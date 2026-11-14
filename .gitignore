@@ -1,0 +1,10 @@
+# Local data: contains your papers, review history and your Gemini API key
+workbench.db
+workbench.db-*
+*.db-wal
+*.db-shm
+
+# Python
+.venv/
+__pycache__/
+*.pyc
