@@ -8,6 +8,11 @@ on:
   schedule:
     - cron: "23 */4 * * *"   # every 4 hours
   workflow_dispatch:          # "Run workflow" button on the Actions tab
+    inputs:
+      refresh:
+        description: "Fetch fresh news and papers (off = just republish, e.g. after an alert)"
+        type: boolean
+        default: true
   push:
     branches: [main]
     paths: ["index.html", "server.py", "build_site.py", "requirements.txt", ".github/workflows/update-site.yml"]
@@ -42,11 +47,19 @@ jobs:
           key: workbench-db-${{ github.run_id }}
           restore-keys: workbench-db-
 
+      # Highest alerts found by the alerts workflow (shown at the top of the News page)
+      - uses: actions/cache/restore@v4
+        with:
+          path: alerts/state.json
+          key: alerts-state-${{ github.run_id }}
+          restore-keys: alerts-state-
+
       - name: Fetch sources and build the site
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKBENCH_GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python build_site.py --db ci-data/workbench.db --save-db ci-data/workbench.db --refresh --site site
+          REFRESH: ${{ (github.event_name != 'workflow_dispatch' || inputs.refresh) && '--refresh' || '' }}
+        run: python build_site.py --db ci-data/workbench.db --save-db ci-data/workbench.db --site site --alerts alerts/state.json $REFRESH
 
       - uses: actions/cache/save@v4
         if: always()

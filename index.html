@@ -270,6 +270,13 @@ ul.triage b{color:var(--ink);font-weight:650}
 .crow .ev-sum{-webkit-line-clamp:1;font-size:13px}
 .crow .ev-actions{border-top:0;padding-top:0}
 @media (max-width:560px){.crow{grid-template-columns:80px minmax(0,1fr)}}
+.alerts{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--bad);border-radius:var(--radius);padding:12px 16px;margin:16px 0 0}
+.alerts.hot{background:var(--bad-soft)}
+.alerts-h{display:flex;align-items:baseline;gap:4px 12px;flex-wrap:wrap}
+.alerts-h h2{font-size:17px}
+.alerts ul{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.alerts li{font-size:14px;line-height:1.4}
+.alerts .alert-link{font-weight:650;color:var(--ink)}
 details.fbrief{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:14px 16px;margin:16px 0 4px;box-shadow:var(--shadow)}
 details.fbrief>summary{cursor:pointer;display:flex;align-items:center;gap:10px;flex-wrap:wrap;list-style:none}
 details.fbrief>summary::-webkit-details-marker{display:none}
@@ -1743,6 +1750,7 @@ function renderNews(ctx) {
       h('button', { class: 'btn primary', id: 'refreshBtn', onclick: doRefresh }, icon('refresh'), h('span', null, 'Refresh'))),
     h('div', { class: 'sources', id: 'newsSources' }),
     h('details', { class: 'feeds' }, h('summary', { id: 'feedsSummary' }, 'Feeds'), h('div', { class: 'feedlist', id: 'feedList' })),
+    STATIC ? alertsView() : null,
     h('div', { id: 'briefBox' }),
     h('div', { class: 'toolbar', style: { marginTop: '18px' } }, h('label', { class: 'search' }, icon('search'), input), kindSel, sortSel),
     h('div', { class: 'toolbar', id: 'viewBar' }),
@@ -1837,6 +1845,20 @@ function drawNews() {
     ? h('div', { class: 'clist' }, news.items.map(it => newsRow(it)))
     : h('div', { class: 'ngrid' }, news.items.map((it, i) => newsCard(it, leadOk && i === 0))));
   $('#newsMore').replaceChildren(news.more ? h('button', { class: 'btn', onclick: () => loadNews(false) }, 'Load more') : null);
+}
+
+/* --- Highest alerts (website): official model releases and major breakthroughs, found by alerts.py --- */
+function alertsView() {
+  const recent = (D.alerts || []).filter(a => Date.now() - Date.parse(a.detected) < 30 * 86400000);
+  const hot = recent.some(a => Date.now() - Date.parse(a.detected) < 48 * 3600000);
+  return h('section', { class: 'alerts' + (hot ? ' hot' : ''), 'aria-label': 'Highest alerts' },
+    h('div', { class: 'alerts-h' }, h('h2', null, '🚨 Highest alerts'),
+      h('span', { class: 'muted small' }, 'New Claude, Gemini and GPT models the moment they are officially released, plus major breakthroughs. Checked every 5 minutes.')),
+    recent.length ? h('ul', null, recent.slice(0, 8).map(a => h('li', null,
+      h('span', { class: 'badge ' + (a.kind === 'release' ? 'bad' : 'accent') }, a.kind === 'release' ? 'New model' : 'Breakthrough'),
+      ' ', extLink(a.kind === 'release' ? `${a.name}${a.vendor ? ' (' + ({ anthropic: 'Anthropic', openai: 'OpenAI', google: 'Google' }[a.vendor] || a.vendor) + ')' : ''}` : a.title, a.url, 'alert-link'),
+      h('span', { class: 'muted small' }, ` · ${ago(a.detected)} · ${a.source}`))))
+      : h('p', { class: 'muted small', style: { margin: '6px 0 0' } }, 'No new Claude, Gemini or GPT release and no major breakthrough in the last 30 days. You get a notification the moment one happens.'));
 }
 
 /* --- Today's Frontier Brief --- */

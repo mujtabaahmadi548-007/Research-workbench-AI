@@ -55,6 +55,7 @@ def main() -> int:
     ap.add_argument("--figures", type=int, default=6, help="with --refresh: load arXiv figures for this many top papers (15 s each)")
     ap.add_argument("--analyze", type=int, default=2, help="with a Gemini key: write breakdowns for this many top papers")
     ap.add_argument("--max-papers", type=int, default=400)
+    ap.add_argument("--alerts", default=str(HERE / "alerts" / "state.json"), help="alerts.py state file (optional)")
     args = ap.parse_args()
 
     tmp = Path(tempfile.mkdtemp(prefix="wb-site-"))
@@ -84,7 +85,7 @@ def main() -> int:
             S.start_refresh("site", None, force=True)
             wait_while(S._refresh_lock, 1800)
             fetch_figures(S, args.figures)
-        if key:
+        if key and args.refresh:   # a quick republish (after an alert) skips Gemini
             run_gemini(S, args.analyze)
     finally:
         S.set_setting("gemini_api_key", None)
@@ -92,6 +93,7 @@ def main() -> int:
         raise SystemExit("Refusing to continue: the working database still holds a Gemini key.")
 
     data = build_snapshot(S, args.max_papers)
+    data["alerts"] = load_alerts(Path(args.alerts))
     write_site(Path(args.site), data)
     if args.save_db:
         with S.db() as c:
@@ -226,6 +228,16 @@ def build_snapshot(S, max_papers: int) -> dict:
         "questions": questions,
         "settings": {"new_per_day": S.setting_int("new_per_day", 0, 500)},
     }
+
+
+def load_alerts(path: Path) -> list[dict]:
+    """The newest highest alerts (model releases, breakthroughs) recorded by alerts.py."""
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    keep = ("kind", "vendor", "name", "title", "url", "source", "published", "detected", "evidence")
+    return [{k: a.get(k) for k in keep} for a in state.get("alerts", [])[:20]]
 
 
 def write_site(site: Path, data: dict) -> None:

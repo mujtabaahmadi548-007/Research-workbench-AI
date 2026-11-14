@@ -7,6 +7,7 @@ workbench.db-*
 # Website build output (GitHub Actions builds and publishes it)
 site/
 ci-data/
+alerts/
 
 # Python
 .venv/

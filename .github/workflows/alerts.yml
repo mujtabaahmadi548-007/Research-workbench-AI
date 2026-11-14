@@ -1,0 +1,67 @@
+# Highest alerts: checks every 5 minutes whether a new Claude, Gemini or GPT model was officially released, or a
+# major AI breakthrough happened, and notifies you (alerts.py explains the rules).
+# Notifications: a GitHub issue that @mentions you (GitHub mobile app push + email). Optional louder push: install
+# the ntfy app, subscribe to a long random topic name, and save that name as the repository secret NTFY_TOPIC.
+name: Highest alerts
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # GitHub may start scheduled runs a few minutes late
+  workflow_dispatch:
+    inputs:
+      test:
+        description: "Send a test notification"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ["alerts.py", ".github/workflows/alerts.yml"]
+
+permissions:
+  contents: read
+  issues: write
+  actions: write
+
+concurrency:
+  group: alerts
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install --quiet "httpx>=0.27" certifi
+
+      - uses: actions/cache/restore@v4
+        with:
+          path: alerts/state.json
+          key: alerts-state-${{ github.run_id }}
+          restore-keys: alerts-state-
+
+      - id: run
+        name: Check for releases and breakthroughs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          WORKBENCH_GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ALERT_TEST: ${{ inputs.test }}
+        run: python alerts.py --state alerts/state.json
+
+      - if: steps.run.outputs.changed == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: alerts/state.json
+          key: alerts-state-${{ github.run_id }}
+
+      - name: Put the alert on the website
+        if: steps.run.outputs.new_alerts == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run update-site.yml --repo "$GITHUB_REPOSITORY" -f refresh=false

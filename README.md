@@ -33,6 +33,27 @@ On the website:
   Each update then also writes the Frontier Brief, triages the top stories and breaks down 2 top papers on GitHub's side.
 - **Update right now:** **Actions → Update website → Run workflow**.
 
+### Highest alerts (notifications)
+
+Every 5 minutes GitHub checks whether a **new Claude, Gemini or GPT model was officially released**, or a **major AI
+breakthrough** happened, and notifies you (`alerts.py`, `.github/workflows/alerts.yml`).
+
+- **Only real releases:** a new model ID in the company's own model documentation (Anthropic, OpenAI, Google), the
+  lab's own announcement ("Introducing …", "… is now available"), or a Hacker News post linking to it. Rumors, leaks,
+  plans and "coming soon" never alert.
+- **Breakthroughs:** an AI story with 500+ Hacker News points and breakthrough wording (solves, proof, discovers,
+  gold medal…), or an official lab post with that wording that Hacker News also picked up. With the `GEMINI_API_KEY`
+  secret, Gemini double-checks that it is really major.
+- **How you are notified:** a GitHub issue that @mentions you. Turn on notifications in the **GitHub mobile app** to
+  get a push on your phone (you also get an email). The alert also appears at the top of the website's News page.
+- **Louder push (optional):** install the free **ntfy** app (Android/iOS, or ntfy.sh in a browser), subscribe to a
+  long random topic name only you know, and save that same name as the repository secret `NTFY_TOPIC`
+  (**Settings → Secrets and variables → Actions**). Alerts then arrive as urgent push notifications.
+- **Test it:** **Actions → Highest alerts → Run workflow**, tick **Send a test notification**.
+- GitHub sometimes starts scheduled runs a few minutes late, so an alert usually arrives within 5–15 minutes of the
+  announcement. GitHub pauses scheduled workflows in repositories with no commits for 60 days (it emails you first);
+  click **Enable workflow** on the Actions tab if that happens.
+
 ---
 
 ## What you need
@@ -243,5 +264,7 @@ from the list (any model with "flash" in its name is a good choice), then click 
 | `index.html` | The whole user interface: vanilla JavaScript and SVG, no build step. The same page runs the website (it switches to website mode when `data.js` is present). |
 | `build_site.py` | Builds the website into `site/`: fetches sources, then writes `data.js` and `index.html`. GitHub Actions runs it every 4 hours. |
 | `.github/workflows/update-site.yml` | The GitHub Actions workflow that builds and publishes the website to GitHub Pages. |
+| `alerts.py` | Highest alerts: detects official Claude / Gemini / GPT releases and major breakthroughs, and notifies you. |
+| `.github/workflows/alerts.yml` | Runs `alerts.py` every 5 minutes on GitHub. |
 | `requirements.txt` | Python packages: FastAPI, Uvicorn, httpx, Pydantic. |
 | `workbench.db` | Created on first run. Your papers, breakdowns, review history and settings (including the key). |
