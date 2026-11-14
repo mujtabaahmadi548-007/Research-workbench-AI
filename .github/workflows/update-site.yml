@@ -1,0 +1,71 @@
+# Builds the website (GitHub Pages) from live sources every 4 hours.
+# One-time setup: GitHub -> Settings -> Pages -> "Build and deployment" -> Source: GitHub Actions.
+# Optional: a repository secret GEMINI_API_KEY makes each update also write the Frontier Brief, triage the top
+# stories and break down 2 top papers. Without it the site still works; you can add your key in the site's Settings.
+name: Update website
+
+on:
+  schedule:
+    - cron: "23 */4 * * *"   # every 4 hours
+  workflow_dispatch:          # "Run workflow" button on the Actions tab
+  push:
+    branches: [main]
+    paths: ["index.html", "server.py", "build_site.py", "requirements.txt", ".github/workflows/update-site.yml"]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # The database carries history between runs (first-seen times, figures, Gemini breakdowns).
+      - uses: actions/cache/restore@v4
+        with:
+          path: ci-data/workbench.db
+          key: workbench-db-${{ github.run_id }}
+          restore-keys: workbench-db-
+
+      - name: Fetch sources and build the site
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKBENCH_GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python build_site.py --db ci-data/workbench.db --save-db ci-data/workbench.db --refresh --site site
+
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: ci-data/workbench.db
+          key: workbench-db-${{ github.run_id }}
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

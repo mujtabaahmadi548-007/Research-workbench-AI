@@ -1396,6 +1396,8 @@ def fetch_github(force: bool = False) -> None:
     notes: list[str] = []
     try:
         headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+        if os.environ.get("GITHUB_TOKEN"):   # optional; GitHub Actions passes one (5,000 requests/hour instead of 60)
+            headers["Authorization"] = "Bearer " + os.environ["GITHUB_TOKEN"]
         with httpx.Client(base_url=GITHUB_API, timeout=HTTP_TIMEOUT, headers=headers, follow_redirects=True,
                           verify=SSL_CTX) as cl:
             rl = cl.get("/rate_limit")  # does not count against the limit

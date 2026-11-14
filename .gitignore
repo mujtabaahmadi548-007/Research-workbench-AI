@@ -4,6 +4,10 @@ workbench.db-*
 *.db-wal
 *.db-shm
 
+# Website build output (GitHub Actions builds and publishes it)
+site/
+ci-data/
+
 # Python
 .venv/
 __pycache__/

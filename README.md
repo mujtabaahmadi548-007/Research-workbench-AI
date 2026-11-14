@@ -7,6 +7,31 @@ paper into a first-principles breakdown with an interactive calculator and engin
 review with spaced repetition.
 
 It runs entirely on your computer: a small Python server (`server.py`) and one web page (`index.html`).
+It also runs as a **website** (GitHub Pages) that you can open on your phone and computer: see the next section.
+
+---
+
+## Use it as a website (phone and computer)
+
+GitHub builds and publishes the website for you every 4 hours (`.github/workflows/update-site.yml`), so it stays
+up to date without your computer. Turn it on once:
+
+1. On GitHub, open the repository, then **Settings → Pages**.
+2. Under **Build and deployment → Source**, choose **GitHub Actions**.
+   (If GitHub says Pages needs an upgrade for private repositories, make the repository public under
+   **Settings → General → Danger Zone → Change visibility**, or use the free GitHub Pro from GitHub Education.)
+3. Open the **Actions** tab → **Update website** → **Run workflow**. After about 10 minutes the site is at
+   `https://<your-github-name>.github.io/Research-workbench-AI/` (also shown on the Settings → Pages screen).
+
+On the website:
+
+- **News, Papers, Repos, Systems Lab, Evolution graph and Review** all work. News and papers are refreshed every 4 hours.
+- **Gemini features** (paper breakdowns, Triage, + Review cards, Frontier Brief): paste your Gemini key in the site's
+  **Settings**. The key is saved only in that browser and sent only to Google; it is never part of the site or the repository.
+- **Your progress** (review schedule, read marks, breakdowns) is saved in each browser, so your phone and your computer each keep their own.
+- **Optional:** add your Gemini key as a repository secret named `GEMINI_API_KEY` (**Settings → Secrets and variables → Actions**).
+  Each update then also writes the Frontier Brief, triages the top stories and breaks down 2 top papers on GitHub's side.
+- **Update right now:** **Actions → Update website → Run workflow**.
 
 ---
 
@@ -215,6 +240,8 @@ from the list (any model with "flash" in its name is a good choice), then click 
 | File | Purpose |
 | --- | --- |
 | `server.py` | FastAPI server: paper, news, model and GitHub ingestion, figures and preview images, importance scoring, SQLite + FTS5 storage, Gemini calls with JSON validation and a retry queue, SM-2 scheduling, starter content. |
-| `index.html` | The whole user interface: vanilla JavaScript and SVG, no build step. |
+| `index.html` | The whole user interface: vanilla JavaScript and SVG, no build step. The same page runs the website (it switches to website mode when `data.js` is present). |
+| `build_site.py` | Builds the website into `site/`: fetches sources, then writes `data.js` and `index.html`. GitHub Actions runs it every 4 hours. |
+| `.github/workflows/update-site.yml` | The GitHub Actions workflow that builds and publishes the website to GitHub Pages. |
 | `requirements.txt` | Python packages: FastAPI, Uvicorn, httpx, Pydantic. |
 | `workbench.db` | Created on first run. Your papers, breakdowns, review history and settings (including the key). |
