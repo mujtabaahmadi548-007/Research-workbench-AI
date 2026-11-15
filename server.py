@@ -2504,7 +2504,9 @@ def start_refresh(trigger: str, sources: Optional[list[str]] = None, force: bool
                 rescore_news()
                 fetch_readmes(30)       # real specs and run commands for the top models/repos
                 fill_preview_images(40)  # descriptions for HN links / summary-less articles found in this refresh
-                start_brief_regen()     # rewrite Today's Frontier Brief in the background for the new items
+                # 30-minute auto-refreshes leave the free Gemini quota alone; the website build writes its own brief
+                if trigger not in ("auto", "site"):
+                    start_brief_regen()  # rewrite Today's Frontier Brief in the background for the new items
         except Exception:
             log.exception("Refresh hit an unexpected error (the app keeps running).")
         finally:
@@ -2517,6 +2519,7 @@ def start_refresh(trigger: str, sources: Optional[list[str]] = None, force: bool
 
 
 AUTO_REFRESH_MINUTES = int(os.environ.get("WORKBENCH_AUTO_REFRESH_MIN", "30"))
+BRIEF_MIN_AGE_HOURS = 2   # a stale Frontier Brief is rewritten automatically at most this often
 
 
 def auto_refresh_loop() -> None:
@@ -4474,7 +4477,9 @@ def frontier_brief_get(automatic: int = 0):
     notice = _brief_notice()
     if row and not automatic:
         stale = row["sync_id"] != sync
-        regenerating = _brief_state["running"] or (stale and start_brief_regen())
+        # Rewrite a stale brief at most every 2 hours on page loads, so frequent refreshes don't use up Gemini's free quota.
+        old_enough = (now_utc() - (parse_iso(row["created_at"]) or now_utc())) >= timedelta(hours=BRIEF_MIN_AGE_HOURS)
+        regenerating = _brief_state["running"] or (stale and old_enough and start_brief_regen())
         data = json.loads(row["data"])
         return {"status": "ready", "brief": data, "items": brief_items(data), "model": row["model"],
                 "generated_at": row["created_at"], "sync_id": sync, "stale": stale, "regenerating": regenerating,
