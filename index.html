@@ -1727,9 +1727,10 @@ function repoCard(r) {
 /* ======================================================================
    News: AI labs, press, analysis, new models, community discussion
    ====================================================================== */
-const news = { q: '', category: 'all', kind: 'all', sort: 'trending', view: 'all', freshUser: null, items: [], more: false, req: 0,
+const news = { q: '', category: 'all', kind: 'all', sort: 'latest', view: 'all', freshUser: null, items: [], more: false, req: 0,
   counts: {}, unread: 0, newSince: 0, lastVisit: null, layout: 'cards' };
 try { if (localStorage.getItem('wb.newsLayout') === 'compact') news.layout = 'compact'; } catch (e) { /* storage unavailable */ }
+try { const s = localStorage.getItem('wb.newsSort'); if (['trending', 'latest', 'important'].includes(s)) news.sort = s; } catch (e) { /* storage unavailable */ }
 const NEWS_CATS = [['all', 'All'], ['model_release', 'Model releases'], ['agents', 'Agents'], ['tools', 'Tools & infra'], ['research', 'Research'], ['industry', 'Industry & policy']];
 const CAT_LABEL = Object.fromEntries(NEWS_CATS);
 const STYPE = { lab: 'Official', press: 'Press', analysis: 'Analysis', community: 'Community', hub: 'Model hub', custom: 'Your feed', repo: 'GitHub' };
@@ -1741,12 +1742,13 @@ function renderNews(ctx) {
   const kindSel = h('select', { 'aria-label': 'Type', onchange: () => { news.kind = kindSel.value; loadNews(true); } },
     [['all', 'All types'], ['article', 'Articles & announcements'], ['model', 'Models on Hugging Face'], ['repo', 'GitHub repos & releases'], ['discussion', 'Hacker News threads']].map(([v, t]) => h('option', { value: v }, t)));
   kindSel.value = news.kind;
-  const sortSel = h('select', { 'aria-label': 'Sort', onchange: () => { news.sort = sortSel.value; loadNews(true); } },
+  const sortSel = h('select', { 'aria-label': 'Sort', onchange: () => { news.sort = sortSel.value; try { localStorage.setItem('wb.newsSort', news.sort); } catch (e) { /* storage unavailable */ } loadNews(true); } },
     [['trending', 'Sort: trending'], ['latest', 'Latest first'], ['important', 'Most important']].map(([v, t]) => h('option', { value: v }, t)));
   sortSel.value = news.sort;
   ctx.main.append(
     h('header', { class: 'view-head' },
-      h('div', null, h('h1', null, 'AI news & releases'), h('p', { class: 'sub' }, 'New models, agents and AI technology from the labs themselves, tech press, expert newsletters, Hugging Face, GitHub and Hacker News. Reports about the same launch are merged into one event. Every card can go to Review, the Systems Lab, or Papers.')),
+      h('div', null, h('h1', null, 'AI news & releases'), h('p', { class: 'sub' }, 'New models, agents and AI technology from the labs themselves, tech press, expert newsletters, Hugging Face, GitHub and Hacker News. Reports about the same launch are merged into one event. Every card can go to Review, the Systems Lab, or Papers.'),
+        STATIC ? h('p', { class: 'small' }, `Website updated ${ago(D.generated_at)} · GitHub refreshes it every 4 hours.`) : null),
       h('button', { class: 'btn primary', id: 'refreshBtn', onclick: doRefresh }, icon('refresh'), h('span', null, 'Refresh'))),
     h('div', { class: 'sources', id: 'newsSources' }),
     h('details', { class: 'feeds' }, h('summary', { id: 'feedsSummary' }, 'Feeds'), h('div', { class: 'feedlist', id: 'feedList' })),
