@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import shutil
 import sqlite3
@@ -77,6 +78,7 @@ def main() -> int:
     S.init_db()
     S.seed_starter()
     S.backfill_scores()
+    gemini_report: dict = {"enabled": bool(key), "note": "no Gemini step in this build (republish only)" if key else "no GEMINI_API_KEY secret"}
     try:
         if key:
             S.set_setting("gemini_api_key", key)
@@ -86,7 +88,7 @@ def main() -> int:
             wait_while(S._refresh_lock, 1800)
             fetch_figures(S, args.figures)
         if key and args.refresh:   # a quick republish (after an alert) skips Gemini
-            run_gemini(S, args.analyze)
+            gemini_report = run_gemini(S, args.analyze, key)
     finally:
         S.set_setting("gemini_api_key", None)
     if S.get_setting("gemini_api_key"):
@@ -94,6 +96,7 @@ def main() -> int:
 
     data = build_snapshot(S, args.max_papers)
     data["alerts"] = load_alerts(Path(args.alerts))
+    data["gemini"] = gemini_report
     write_site(Path(args.site), data)
     if args.save_db:
         with S.db() as c:
@@ -123,14 +126,67 @@ def fetch_figures(S, n: int) -> None:
             print(f"Figures: arXiv:{aid} failed ({exc})")
 
 
-def run_gemini(S, n_analyze: int) -> None:
-    """With a key: triage the top events, write the Frontier Brief and break down a few top papers."""
+class _GeminiLog(logging.Handler):
+    """Collects the app's Gemini warnings during a build, so the website can show whether the key works."""
+
+    def __init__(self, key: str):
+        super().__init__(logging.WARNING)
+        self.key, self.lines = key, []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        msg = record.getMessage()
+        if "gemini" in msg.lower() and len(self.lines) < 12:
+            self.lines.append(msg.replace(self.key, "***")[:240] if self.key else msg[:240])
+
+
+def _gemini_counts(S) -> dict:
+    with S.db() as c:
+        return {"triaged": c.execute("SELECT COUNT(*) FROM news WHERE brief IS NOT NULL").fetchone()[0],
+                "analyses": c.execute("SELECT COUNT(*) FROM analyses").fetchone()[0]}
+
+
+def _wait_out_rate_limit(S, cap: float = 90) -> None:
+    left = S._gemini_pause_until - time.time()
+    if left > 0:
+        print(f"Gemini: rate limited, waiting {min(left, cap):.0f} s before the next step.")
+        time.sleep(min(left, cap))
+        S._gemini_pause_until = 0.0
+
+
+def run_gemini(S, n_analyze: int, key: str = "") -> dict:
+    """With a key: triage the top events, write the Frontier Brief and break down a few top papers.
+    Returns a small report (counts and Gemini error messages, never the key) that goes on the website."""
+    handler = _GeminiLog(key)
+    S.log.addHandler(handler)
+    before = _gemini_counts(S)
+    try:
+        _run_gemini_steps(S, n_analyze)
+    finally:
+        S.log.removeHandler(handler)
+    after = _gemini_counts(S)
+    with S.db() as c:
+        queue = [{"paper": r["arxiv_id"], "status": r["status"], "kind": r["kind"], "message": (r["message"] or "")[:200]}
+                 for r in c.execute("SELECT arxiv_id, status, kind, message FROM analysis_queue WHERE status != 'running'")]
+    brief = S.frontier_brief_get()
+    report = {"enabled": True, "checked_at": S.iso(),
+              "triaged_this_build": after["triaged"] - before["triaged"],
+              "breakdowns_this_build": after["analyses"] - before["analyses"],
+              "brief": {"status": brief.get("status"), "model": brief.get("model"), "generated_at": brief.get("generated_at")},
+              "problems": handler.lines, "queue": queue[:10]}
+    print("Gemini report:", json.dumps(report, ensure_ascii=False))
+    return report
+
+
+def _run_gemini_steps(S, n_analyze: int) -> None:
+    _wait_out_rate_limit(S)   # the refresh may already have written a brief and hit the per-minute limit
     try:
         S.process_briefs(5)
     except Exception as exc:
         print("Gemini triage skipped:", exc)
+    _wait_out_rate_limit(S)
     if S.start_brief_regen(force=True) or S._brief_lock.locked():
         wait_while(S._brief_lock, 300)
+    _wait_out_rate_limit(S)
     if n_analyze > 0:
         latest = "COALESCE(p.latest_at, p.published, p.first_seen)"
         with S.db() as c:
