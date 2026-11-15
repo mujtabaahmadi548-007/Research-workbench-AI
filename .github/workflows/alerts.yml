@@ -2,11 +2,16 @@
 # major AI breakthrough happened, and notifies you (alerts.py explains the rules).
 # Notifications: a GitHub issue that @mentions you (GitHub mobile app push + email). Optional louder push: install
 # the ntfy app, subscribe to a long random topic name, and save that name as the repository secret NTFY_TOPIC.
+#
+# Why a loop: GitHub delays and drops frequent cron schedules (the old "*/5" schedule really ran every 3-7 hours).
+# So one run stays up for about 5 h 20 min, checks every 5 minutes, then starts the next run itself. The hourly
+# schedule is only a backup that restarts the loop if the chain ever breaks; the concurrency group keeps it to one
+# loop at a time. Actions minutes are free for public repositories.
 name: Highest alerts
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # GitHub may start scheduled runs a few minutes late
+    - cron: "17 * * * *"   # backup only; the loop below does the 5-minute checks
   workflow_dispatch:
     inputs:
       test:
@@ -29,7 +34,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
@@ -46,22 +51,43 @@ jobs:
           restore-keys: alerts-state-
 
       - id: run
-        name: Check for releases and breakthroughs
+        name: Check every 5 minutes for about 5 hours
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
           WORKBENCH_GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
-          ALERT_TEST: ${{ inputs.test }}
-        run: python alerts.py --state alerts/state.json
+          TEST_INPUT: ${{ inputs.test }}
+          LOOP_SECONDS: "19200"   # 5 h 20 min, inside the 6-hour job limit
+          INTERVAL: "300"
+        run: |
+          start=$(date +%s); n=0; changed=false
+          while :; do
+            n=$((n + 1)); t0=$(date +%s)
+            out=$(mktemp)
+            if [ "$n" = 1 ]; then export ALERT_TEST="$TEST_INPUT"; else export ALERT_TEST=false; fi
+            GITHUB_OUTPUT="$out" python alerts.py --state alerts/state.json || echo "Check $n failed; trying again next round."
+            grep -q '^changed=true' "$out" && changed=true
+            if grep -q '^new_alerts=true' "$out"; then
+              gh workflow run update-site.yml --repo "$GITHUB_REPOSITORY" -f refresh=false || true
+            fi
+            rm -f "$out"
+            now=$(date +%s)
+            [ $((now - start + INTERVAL)) -ge "$LOOP_SECONDS" ] && break
+            sleep $(( INTERVAL - (now - t0) > 5 ? INTERVAL - (now - t0) : 5 ))
+          done
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "Ran $n checks."
 
-      - if: steps.run.outputs.changed == 'true'
+      - name: Save what was already alerted
+        if: always() && hashFiles('alerts/state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: alerts/state.json
           key: alerts-state-${{ github.run_id }}
 
-      - name: Put the alert on the website
-        if: steps.run.outputs.new_alerts == 'true'
+      - name: Start the next 5-minute loop
+        if: always() && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run update-site.yml --repo "$GITHUB_REPOSITORY" -f refresh=false
+        run: gh workflow run alerts.yml --repo "$GITHUB_REPOSITORY" --ref main
