@@ -2516,6 +2516,16 @@ def start_refresh(trigger: str, sources: Optional[list[str]] = None, force: bool
     return True
 
 
+AUTO_REFRESH_MINUTES = int(os.environ.get("WORKBENCH_AUTO_REFRESH_MIN", "30"))
+
+
+def auto_refresh_loop() -> None:
+    """Keeps the news fresh while the app stays open (fetch otherwise only ran at startup or on Refresh)."""
+    while not _stop.wait(AUTO_REFRESH_MINUTES * 60):
+        if start_refresh("auto"):
+            log.info("Auto-refresh: fetching live sources (every %d min).", AUTO_REFRESH_MINUTES)
+
+
 # ---------------------------------------------------------------------------
 # Gemini paper deconstructor
 # ---------------------------------------------------------------------------
@@ -4111,6 +4121,9 @@ async def lifespan(_: FastAPI):
         start_refresh("startup")
     else:
         log.info("  Startup fetch is off; use the Refresh button.")
+    if not NO_STARTUP_FETCH and AUTO_REFRESH_MINUTES > 0:
+        threading.Thread(target=auto_refresh_loop, name="auto-refresh", daemon=True).start()
+        log.info("  Auto-refresh every %d minutes while the app is open.", AUTO_REFRESH_MINUTES)
     _worker_wake.set()
     yield
     _stop.set()
