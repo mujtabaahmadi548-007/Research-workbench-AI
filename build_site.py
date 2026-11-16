@@ -1,7 +1,8 @@
 """Build the website version of the Workbench (for GitHub Pages) into the site/ folder.
 
-GitHub Actions runs this every few hours (.github/workflows/update-site.yml), so the website keeps itself up to
-date without your computer. You can also run it yourself and open site/index.html in a browser:
+GitHub Actions runs this about every 10 minutes (.github/workflows/update-site.yml), so the website stays live
+without your computer. Each build also writes version.json; open pages check it once a minute and load the new
+data.js by themselves. You can also run it yourself and open site/index.html in a browser:
 
     .\\.venv\\Scripts\\python.exe build_site.py --db workbench.db             # snapshot of your local data
     .\\.venv\\Scripts\\python.exe build_site.py --db workbench.db --refresh   # fetch fresh data first (a few minutes)
@@ -27,7 +28,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PLACEHOLDER = "<!-- STATIC_DATA -->"
 KEEP_SETTINGS = ("news_sync_at", "news_visit_last", "news_visit_prev", "new_per_day", "score_version",
-                 "gh_releases_last", "arxiv_max_results", "hf_limit", "custom_feeds")
+                 "gh_releases_last", "arxiv_max_results", "hf_limit", "custom_feeds",
+                 "site_gemini_last", "site_gemini_report")
 
 
 def copy_database(src: Path, dst: Path) -> None:
@@ -55,6 +57,8 @@ def main() -> int:
     ap.add_argument("--refresh", action="store_true", help="fetch all sources before building")
     ap.add_argument("--figures", type=int, default=6, help="with --refresh: load arXiv figures for this many top papers (15 s each)")
     ap.add_argument("--analyze", type=int, default=2, help="with a Gemini key: write breakdowns for this many top papers")
+    ap.add_argument("--gemini-every", type=float, default=0, metavar="HOURS",
+                    help="with a Gemini key: use Gemini at most this often (0 = every build); frequent builds would use up the free quota")
     ap.add_argument("--max-papers", type=int, default=400)
     ap.add_argument("--alerts", default=str(HERE / "alerts" / "state.json"), help="alerts.py state file (optional)")
     args = ap.parse_args()
@@ -79,16 +83,30 @@ def main() -> int:
     S.seed_starter()
     S.backfill_scores()
     gemini_report: dict = {"enabled": bool(key), "note": "no Gemini step in this build (republish only)" if key else "no GEMINI_API_KEY secret"}
+    # Builds run every few minutes; Gemini (free quota) only joins every --gemini-every hours. In between, the
+    # key is not even loaded and the website keeps showing the report of the last Gemini build.
+    last_gemini = S.parse_iso(S.get_setting("site_gemini_last"))
+    gemini_due = bool(key) and args.refresh and (
+        last_gemini is None or (S.now_utc() - last_gemini).total_seconds() >= args.gemini_every * 3600)
     try:
-        if key:
+        if gemini_due:
             S.set_setting("gemini_api_key", key)
         if args.refresh:
             print("Fetching fresh data: news feeds, Hugging Face, arXiv, Hacker News, GitHub...")
-            S.start_refresh("site", None, force=True)
+            # force=False: GitHub releases keep their own 30-minute minimum (server.RELEASES_MIN_AGE)
+            S.start_refresh("site", None, force=False)
             wait_while(S._refresh_lock, 1800)
             fetch_figures(S, args.figures)
-        if key and args.refresh:   # a quick republish (after an alert) skips Gemini
+        if gemini_due:
             gemini_report = run_gemini(S, args.analyze, key)
+            S.set_setting("site_gemini_last", S.iso())
+            S.set_setting("site_gemini_report", json.dumps(gemini_report, ensure_ascii=False))
+        elif key and args.refresh:
+            try:
+                gemini_report = json.loads(S.get_setting("site_gemini_report") or "")
+            except ValueError:
+                gemini_report = {"enabled": True, "note": "Gemini joins a build every few hours; none since this database started"}
+            print(f"Gemini: skipped (last used {S.get_setting('site_gemini_last')}, at most every {args.gemini_every:g} h).")
     finally:
         S.set_setting("gemini_api_key", None)
     if S.get_setting("gemini_api_key"):
@@ -307,6 +325,9 @@ def write_site(site: Path, data: dict) -> None:
     site.mkdir(parents=True)
     text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
     (site / "data.js").write_text("window.WB_DATA = " + text + ";\n", encoding="utf-8")
+    # Open pages fetch this small file once a minute and load the new data.js when generated_at changes.
+    (site / "version.json").write_text(json.dumps({"generated_at": data["generated_at"], "news_sync_at": data.get("news_sync_at"),
+                                                   "news": len(data["news"])}), encoding="utf-8")
     (site / "index.html").write_text(html, encoding="utf-8")
     (site / ".nojekyll").write_text("", encoding="utf-8")
     print(f"Website written to {site}: {len(data['news'])} news events, {len(data['papers'])} papers, "

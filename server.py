@@ -2504,7 +2504,7 @@ def start_refresh(trigger: str, sources: Optional[list[str]] = None, force: bool
                 rescore_news()
                 fetch_readmes(30)       # real specs and run commands for the top models/repos
                 fill_preview_images(40)  # descriptions for HN links / summary-less articles found in this refresh
-                # 30-minute auto-refreshes leave the free Gemini quota alone; the website build writes its own brief
+                # auto-refreshes (every 10 min) leave the free Gemini quota alone; the website build writes its own brief
                 if trigger not in ("auto", "site"):
                     start_brief_regen()  # rewrite Today's Frontier Brief in the background for the new items
         except Exception:
@@ -2518,15 +2518,21 @@ def start_refresh(trigger: str, sources: Optional[list[str]] = None, force: bool
     return True
 
 
-AUTO_REFRESH_MINUTES = int(os.environ.get("WORKBENCH_AUTO_REFRESH_MIN", "30"))
+AUTO_REFRESH_MINUTES = int(os.environ.get("WORKBENCH_AUTO_REFRESH_MIN", "10"))
+AUTO_FULL_REFRESH_MINUTES = 30   # papers and GitHub change slowly (and GitHub allows 60 requests/hour without a token)
 BRIEF_MIN_AGE_HOURS = 2   # a stale Frontier Brief is rewritten automatically at most this often
 
 
 def auto_refresh_loop() -> None:
-    """Keeps the news fresh while the app stays open (fetch otherwise only ran at startup or on Refresh)."""
+    """Keeps the app live while it stays open: news feeds, trending models and Hacker News every
+    AUTO_REFRESH_MINUTES, and everything (plus arXiv, Hugging Face papers, GitHub) every 30 minutes."""
+    full_every = max(1, round(AUTO_FULL_REFRESH_MINUTES / AUTO_REFRESH_MINUTES))
+    n = 0
     while not _stop.wait(AUTO_REFRESH_MINUTES * 60):
-        if start_refresh("auto"):
-            log.info("Auto-refresh: fetching live sources (every %d min).", AUTO_REFRESH_MINUTES)
+        n += 1
+        full = n % full_every == 0
+        if start_refresh("auto", None if full else list(NEWS_SOURCES)):
+            log.info("Auto-refresh: fetching %s (every %d min).", "all sources" if full else "news, models and Hacker News", AUTO_REFRESH_MINUTES)
 
 
 # ---------------------------------------------------------------------------

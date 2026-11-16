@@ -1,16 +1,22 @@
-# Builds the website (GitHub Pages) from live sources every 4 hours.
+# Keeps the website (GitHub Pages) live: fetches the sources and republishes about every 10 minutes.
 # One-time setup: GitHub -> Settings -> Pages -> "Build and deployment" -> Source: GitHub Actions.
-# Optional: a repository secret GEMINI_API_KEY makes each update also write the Frontier Brief, triage the top
-# stories and break down 2 top papers. Without it the site still works; you can add your key in the site's Settings.
+# Optional: a repository secret GEMINI_API_KEY makes an update (at most every 4 hours, to protect the free quota)
+# also write the Frontier Brief, triage the top stories and break down 2 top papers. Without it the site still
+# works; you can add your key in the site's Settings.
+#
+# Why a chain: GitHub delays and drops cron schedules (the old "every 4 hours" schedule really ran every 6-10
+# hours). So each run publishes the site and then starts the next run itself, 10 minutes after it began. The hourly
+# schedule is only a backup that restarts the chain if it ever breaks; the concurrency group keeps it to one run
+# at a time. Actions minutes are free for public repositories.
 name: Update website
 
 on:
   schedule:
-    - cron: "23 */4 * * *"   # every 4 hours
+    - cron: "23 * * * *"     # backup only; each run starts the next one (see the "next" job)
   workflow_dispatch:          # "Run workflow" button on the Actions tab
     inputs:
       refresh:
-        description: "Fetch fresh news and papers (off = just republish, e.g. after an alert)"
+        description: "Fetch fresh news and papers (off = just republish)"
         type: boolean
         default: true
   push:
@@ -21,6 +27,7 @@ permissions:
   contents: read
   pages: write
   id-token: write
+  actions: write
 
 concurrency:
   group: pages
@@ -30,7 +37,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      t0: ${{ steps.clock.outputs.t0 }}
     steps:
+      - id: clock
+        run: echo "t0=$(date +%s)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -59,7 +71,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKBENCH_GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
           REFRESH: ${{ (github.event_name != 'workflow_dispatch' || inputs.refresh) && '--refresh' || '' }}
-        run: python build_site.py --db ci-data/workbench.db --save-db ci-data/workbench.db --site site --alerts alerts/state.json $REFRESH
+        run: python build_site.py --db ci-data/workbench.db --save-db ci-data/workbench.db --site site --alerts alerts/state.json --figures 2 --gemini-every 4 $REFRESH
 
       - uses: actions/cache/save@v4
         if: always()
@@ -82,3 +94,24 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # Starts the next update 10 minutes after this one began (30 minutes after a failed one, so a broken build
+  # cannot spin). Runs even when the build or the deploy failed, so one bad run never stops the updates.
+  next:
+    needs: [build, deploy]
+    if: always() && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Wait, then start the next update
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          T0: ${{ needs.build.outputs.t0 }}
+          OK: ${{ needs.build.result == 'success' && needs.deploy.result == 'success' }}
+        run: |
+          now=$(date +%s)
+          interval=600
+          [ "$OK" = "true" ] || interval=1800
+          wait=$(( interval - (now - ${T0:-$now}) ))
+          if [ "$wait" -gt 0 ]; then echo "Next update in $wait s."; sleep "$wait"; fi
+          gh workflow run update-site.yml --repo "$GITHUB_REPOSITORY" --ref main

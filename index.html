@@ -120,6 +120,7 @@ textarea{width:100%;resize:vertical;min-height:80px}
 .toast{background:var(--ink);color:var(--bg);padding:10px 14px;border-radius:10px;box-shadow:var(--shadow);font-size:14px;animation:tin .2s ease-out}
 .toast.bad{background:var(--bad);color:#fff}
 @keyframes tin{from{transform:translateY(8px);opacity:0}}
+.livepill{position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:90;border-radius:999px;box-shadow:var(--shadow);padding:8px 16px}
 .kbd{font-family:var(--mono);font-size:11px;border:1px solid var(--line-2);border-bottom-width:2px;border-radius:4px;padding:0 4px;color:var(--ink-3)}
 
 /* feed */
@@ -681,11 +682,12 @@ function toast(msg, kind = '') {
 
 /* ======================================================================
    Website mode (GitHub Pages). There is no server: news, papers and repos come from data.js, which GitHub
-   Actions rebuilds every few hours (build_site.py). Review progress, read marks, Gemini breakdowns and the
-   Gemini key are kept in this browser (localStorage). Gemini is called directly from the browser.
+   Actions rebuilds about every 10 minutes (build_site.py); the page loads each new build by itself (see "Live
+   updates" below). Review progress, read marks, Gemini breakdowns and the Gemini key are kept in this browser
+   (localStorage). Gemini is called directly from the browser.
    ====================================================================== */
 const STATIC = !!window.WB_DATA;
-const D = window.WB_DATA || null;
+let D = window.WB_DATA || null;   // replaced by liveSwap() when a newer build is published
 const LS = {
   get(k, d) { try { const v = localStorage.getItem('wb.' + k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem('wb.' + k, JSON.stringify(v)); return true; } catch (e) { return false; } },
@@ -705,9 +707,75 @@ const siteActionsUrl = () => D && D.repo ? `https://github.com/${D.repo}/actions
 function siteNote() {
   const u = siteActionsUrl();
   return h('div', { class: 'note', id: 'siteNote', style: { margin: '0 0 16px' } },
-    h('b', null, 'This website updates itself. '),
-    `GitHub Actions fetches fresh news, models and papers every 4 hours (last update ${ago(D.generated_at)}). `,
-    u ? ['To update right now, open ', h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, 'Update website on GitHub ↗'), ', press "Run workflow", and reload this page in about 10 minutes.'] : '');
+    h('b', null, 'This website is live. '),
+    `GitHub fetches fresh news, models and papers about every 10 minutes, and this page loads each update by itself, no reload needed (last update ${ago(D.generated_at)}). `,
+    u ? ['If it ever falls behind, open ', h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, 'Update website on GitHub ↗'), ' and press "Run workflow".'] : '');
+}
+
+/* --- Live updates (website). Each build writes version.json; this page checks it once a minute while the tab is
+   visible and swaps the new data in without a reload. At the top of the News page new stories appear by
+   themselves; further down (or while searching) a "new stories" pill offers them instead of moving the page. --- */
+const live = { failed: 0, pending: 0, loading: false, timer: null };
+const LIVE_CHECK_MS = 60000, LIVE_LATE_MS = 45 * 60000;
+const liveLate = () => Date.now() - Date.parse(D.generated_at) > LIVE_LATE_MS;
+const siteStampText = () => liveLate() ? `Updates are delayed: last update ${ago(D.generated_at)}.` : `Live · updated ${ago(D.generated_at)} · refreshes about every 10 minutes.`;
+async function liveCheck() {
+  clearTimeout(live.timer);
+  if (!STATIC) return;
+  if (!document.hidden && !live.loading) {
+    try {
+      const r = await fetch('version.json?t=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const v = await r.json();
+      live.failed = 0;
+      if (v.generated_at && v.generated_at > D.generated_at) await liveLoad(v.generated_at);
+    } catch (e) { live.failed++; }   // offline, or opened from a file: keep showing what we have
+    if (app.status) drawSideStatus();
+  }
+  clearTimeout(live.timer);
+  live.timer = setTimeout(liveCheck, LIVE_CHECK_MS);
+}
+function liveLoad(stamp) {
+  return new Promise(resolve => {
+    live.loading = true;
+    const s = document.createElement('script');
+    const done = () => { s.remove(); live.loading = false; resolve(); };
+    s.src = 'data.js?v=' + stamp.replace(/[-:]/g, '');
+    s.onload = () => { const nd = window.WB_DATA; if (nd && nd !== D && nd.generated_at > D.generated_at) { try { liveSwap(nd); } catch (e) { console.error(e); } } done(); };
+    s.onerror = done;
+    document.head.append(s);
+  });
+}
+function liveSwap(nd) {
+  const had = new Set(D.news.map(it => it.id)), oldBrief = (D.brief || {}).generated_at;
+  const added = nd.news.filter(it => !had.has(it.id)).length;
+  D = nd;
+  Object.keys(SX).forEach(k => delete SX[k]);   // lookup tables are rebuilt from the new data on next use
+  pollStatus();                                  // sidebar: source times and counts
+  if (app.view !== 'news' || !$('#newsList')) return;   // other pages read the new data the next time they load
+  const al = $('#main .alerts'); if (al) al.replaceWith(alertsView());
+  updateNewsStatus(); loadNewsFeeds();
+  if ((D.brief || {}).generated_at !== oldBrief) loadBrief();
+  if (!added) return;
+  live.pending += added;
+  const typing = /^(INPUT|TEXTAREA|SELECT)$/.test((document.activeElement || {}).tagName || '');
+  if (window.scrollY < 300 && !typing) liveShow(); else drawLivePill();
+}
+function liveShow() {
+  const n = live.pending;
+  liveClearPill();
+  loadNews(true);
+  if (n) toast(`${n} new ${n === 1 ? 'story' : 'stories'} just in.`);
+}
+function drawLivePill(label) {
+  const old = $('#livePill'); if (old) old.remove();
+  const text = label || `↑ ${live.pending} new ${live.pending === 1 ? 'story' : 'stories'}`;
+  document.body.append(h('button', { class: 'btn primary livepill', id: 'livePill', title: 'Show the latest news', onclick: () => { window.scrollTo({ top: 0, behavior: 'smooth' }); liveShow(); } }, text));
+}
+function liveClearPill() { live.pending = 0; const p = $('#livePill'); if (p) p.remove(); }
+if (STATIC) {
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) liveCheck(); });
+  window.addEventListener('online', liveCheck);
 }
 
 async function staticApi(path, opts = {}) {
@@ -715,7 +783,7 @@ async function staticApi(path, opts = {}) {
   const p = u.pathname, q = u.searchParams, method = (opts.method || 'GET').toUpperCase(), body = opts.body || {};
   let x;
   if (p === '/api/status') return sStatus();
-  if (p === '/api/refresh') return { started: false, message: 'This website updates itself every 4 hours.' };
+  if (p === '/api/refresh') return { started: false, message: 'This website updates itself about every 10 minutes.' };
   if (p === '/api/news') return sNews(q);
   if (p === '/api/news/visit') return sVisit();
   if (p === '/api/news/seen') return sSeen(body);
@@ -1528,7 +1596,9 @@ function drawSideStatus() {
   box.replaceChildren(
     ...st.sources.map(src => h('div', { class: 'src', title: src.message || '' }, h('span', { class: 'dot ' + src.status }), `${short[src.name] || src.name}: ${src.status === 'running' ? 'fetching…' : ago(src.last_success)}`)),
     h('div', { class: 'src' }, h('span', { class: 'dot ' + (st.gemini.has_key ? 'ok' : 'never') }), st.gemini.has_key ? 'Gemini key set' + (STATIC ? ' (this browser)' : '') : 'No Gemini key'),
-    STATIC ? h('div', { class: 'src', title: 'Rebuilt by GitHub Actions every 4 hours' }, h('span', { class: 'dot ok' }), 'Website updated ' + ago(D.generated_at)) : null);
+    STATIC ? h('div', { class: 'src', title: 'GitHub rebuilds the website about every 10 minutes; this page checks for a new build every minute and loads it by itself' },
+      h('span', { class: 'dot ' + (liveLate() ? 'offline' : 'ok') }), (liveLate() ? 'Updates delayed · last ' : 'Live · updated ') + ago(D.generated_at)) : null);
+  const stamp = $('#siteStamp'); if (stamp && STATIC) stamp.textContent = siteStampText();
 }
 async function pollStatus() {
   clearTimeout(app.statusTimer);
@@ -1549,6 +1619,7 @@ function parseHash() {
 }
 function route() {
   app.cleanup.splice(0).forEach(fn => { try { fn(); } catch (e) { /* ignore */ } });
+  liveClearPill();
   const token = ++app.token;
   const { parts, params } = parseHash();
   const view = parts[0] || 'news';
@@ -1595,9 +1666,14 @@ function updateFeedStatus() {
   }
 }
 async function doRefresh() {
-  if (STATIC) {   // the website is rebuilt by GitHub Actions; explain instead
-    const old = $('#siteNote');
-    if (old) old.remove(); else { const head = $('#main .view-head'); if (head) head.after(siteNote()); }
+  if (STATIC) {   // the website is rebuilt by GitHub Actions: check for a newer build right now
+    const before = D.generated_at;
+    await liveCheck();
+    if (D.generated_at !== before) { if ($('#livePill')) liveShow(); else if (!$('#toasts').children.length) toast('Loaded the latest update.'); }
+    else toast(live.failed ? 'Could not check for updates (offline?).' : `Already up to date: updated ${ago(D.generated_at)}. New data arrives about every 10 minutes.`, live.failed ? 'bad' : '');
+    const old = $('#siteNote'), head = $('#main .view-head');
+    if (old) old.remove();
+    if (liveLate() && head) head.after(siteNote());   // explain how to restart updates only when they are late
     return;
   }
   try {
@@ -1614,7 +1690,12 @@ function sourceCards(names) {
     h('div', { class: 'when' }, 'Last fetched: ', src.last_success ? ago(src.last_success) : 'never', src.last_attempt && src.status !== 'ok' && src.status !== 'running' ? ` · last try ${ago(src.last_attempt)}` : '')));
 }
 function onRefreshDone() {
-  if (app.view === 'news') { loadNews(true); loadNewsFeeds(); toast('News refreshed.'); return; }
+  if (app.view === 'news') {
+    loadNewsFeeds();
+    // An automatic refresh must not move the page under a reader: further down, offer the fresh list instead.
+    if (window.scrollY < 300) { loadNews(true); toast('News refreshed.'); } else drawLivePill('↑ News refreshed · show latest');
+    return;
+  }
   if (app.view !== 'feed' || parseHash().parts[0] === 'paper') return;
   if ($('#paperList')) loadPapers(true);
   if ($('#repoBody')) loadRepos();
@@ -1748,7 +1829,7 @@ function renderNews(ctx) {
   ctx.main.append(
     h('header', { class: 'view-head' },
       h('div', null, h('h1', null, 'AI news & releases'), h('p', { class: 'sub' }, 'New models, agents and AI technology from the labs themselves, tech press, expert newsletters, Hugging Face, GitHub and Hacker News. Reports about the same launch are merged into one event. Every card can go to Review, the Systems Lab, or Papers.'),
-        STATIC ? h('p', { class: 'small' }, `Website updated ${ago(D.generated_at)} · GitHub refreshes it every 4 hours.`) : null),
+        STATIC ? h('p', { class: 'small', id: 'siteStamp' }, siteStampText()) : null),
       h('button', { class: 'btn primary', id: 'refreshBtn', onclick: doRefresh }, icon('refresh'), h('span', null, 'Refresh'))),
     h('div', { class: 'sources', id: 'newsSources' }),
     h('details', { class: 'feeds' }, h('summary', { id: 'feedsSummary' }, 'Feeds'), h('div', { class: 'feedlist', id: 'feedList' })),
@@ -3040,7 +3121,7 @@ function renderSiteSettings(ctx) {
   } }, 'Erase this browser\'s data');
   const u = siteActionsUrl();
   main.append(h('header', { class: 'view-head' }, h('div', null, h('h1', null, 'Settings'),
-    h('p', { class: 'sub' }, 'This is the website version. News, papers and repos are rebuilt by GitHub Actions every 4 hours. Your review progress, read marks, Gemini breakdowns and your Gemini key are saved in this browser only (your phone and your computer each keep their own).'))),
+    h('p', { class: 'sub' }, 'This is the website version. News, papers and repos are rebuilt by GitHub Actions about every 10 minutes and appear here by themselves. Your review progress, read marks, Gemini breakdowns and your Gemini key are saved in this browser only (your phone and your computer each keep their own).'))),
   h('div', { class: 'set-grid' },
     h('section', { class: 'card' }, h('h2', { style: { marginBottom: '14px' } }, 'Gemini'),
       h('div', { class: 'field' }, h('label', null, 'API key'),
@@ -3064,8 +3145,8 @@ function renderSiteSettings(ctx) {
     h('section', { class: 'card' }, h('h2', { style: { marginBottom: '8px' } }, 'Website data'),
       h('p', { class: 'small', style: { margin: '0 0 8px' } }, `Last update: ${ago(D.generated_at)} (${new Date(D.generated_at).toLocaleString()}). ${D.news.length} news events, ${D.papers.length} papers, ${(D.repos.tracked || []).length + (D.repos.new || []).length} repos.`),
       h('div', { class: 'feedlist' }, D.sources.map(s => h('span', { title: s.message || '' }, h('span', { class: 'dot ' + (s.status || 'never') }), `${s.label || s.name}: ${s.last_success ? ago(s.last_success) : 'never'}`))),
-      h('p', { class: 'small muted' }, 'GitHub Actions rebuilds the website every 4 hours. ', u ? ['To update now: ', h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, 'Update website ↗'), ' → Run workflow.'] : ''),
-      h('p', { class: 'small muted', style: { marginBottom: 0 } }, 'Optional: add your Gemini key as a repository secret named GEMINI_API_KEY (GitHub → Settings → Secrets and variables → Actions) and every update also writes the Frontier Brief, triages the top stories and breaks down 2 top papers for everyone who opens the site.')),
+      h('p', { class: 'small muted' }, 'GitHub Actions rebuilds the website about every 10 minutes, and open pages load each update by themselves. ', u ? ['If it falls behind: ', h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, 'Update website ↗'), ' → Run workflow.'] : ''),
+      h('p', { class: 'small muted', style: { marginBottom: 0 } }, 'Optional: add your Gemini key as a repository secret named GEMINI_API_KEY (GitHub → Settings → Secrets and variables → Actions) and about every 4 hours an update also writes the Frontier Brief, triages the top stories and breaks down 2 top papers for everyone who opens the site.')),
     h('section', { class: 'card' }, h('h2', { style: { marginBottom: '8px' } }, 'This browser'),
       h('p', { class: 'small muted', style: { marginTop: 0 } }, 'Erase your review progress, read marks, Gemini breakdowns, review cards and key from this browser. The website itself is not affected.'),
       clearBtn)));
@@ -3159,6 +3240,7 @@ async function renderSettings(ctx) {
   try { const g = await api('/api/graph'); g.concepts.forEach(c => { CONCEPT_LABELS[c.id] = c.label; }); } catch (e) { /* labels fall back to ids */ }
   route();
   pollStatus();
+  liveCheck();
 })();
 </script>
 </body>

@@ -13,8 +13,9 @@ It also runs as a **website** (GitHub Pages) that you can open on your phone and
 
 ## Use it as a website (phone and computer)
 
-GitHub builds and publishes the website for you every 4 hours (`.github/workflows/update-site.yml`), so it stays
-up to date without your computer. Turn it on once:
+GitHub builds and publishes the website for you about every 10 minutes (`.github/workflows/update-site.yml`: each
+run starts the next one, because GitHub's own schedules run hours late), so it stays live without your computer.
+An open page checks for a new build every minute and shows it without a reload. Turn it on once:
 
 1. On GitHub, open the repository, then **Settings → Pages**.
 2. Under **Build and deployment → Source**, choose **GitHub Actions**.
@@ -25,7 +26,7 @@ up to date without your computer. Turn it on once:
 
 On the website:
 
-- **News, Papers, Repos, Systems Lab, Evolution graph and Review** all work. News and papers are refreshed every 4 hours.
+- **News, Papers, Repos, Systems Lab, Evolution graph and Review** all work. News and papers are refreshed about every 10 minutes; the sidebar shows "Live · updated … ago".
 - **Gemini features** (paper breakdowns, Triage, + Review cards, Frontier Brief): paste your Gemini key in the site's
   **Settings**. The key is saved only in that browser and sent only to Google; it is never part of the site or the repository.
 - **Your progress** (review schedule, read marks, breakdowns) is saved in each browser, so your phone and your computer each keep their own.
@@ -262,7 +263,7 @@ from the list (any model with "flash" in its name is a good choice), then click 
 | --- | --- |
 | `server.py` | FastAPI server: paper, news, model and GitHub ingestion, figures and preview images, importance scoring, SQLite + FTS5 storage, Gemini calls with JSON validation and a retry queue, SM-2 scheduling, starter content. |
 | `index.html` | The whole user interface: vanilla JavaScript and SVG, no build step. The same page runs the website (it switches to website mode when `data.js` is present). |
-| `build_site.py` | Builds the website into `site/`: fetches sources, then writes `data.js` and `index.html`. GitHub Actions runs it every 4 hours. |
+| `build_site.py` | Builds the website into `site/`: fetches sources, then writes `data.js`, `version.json` and `index.html`. GitHub Actions runs it about every 10 minutes. |
 | `.github/workflows/update-site.yml` | The GitHub Actions workflow that builds and publishes the website to GitHub Pages. |
 | `alerts.py` | Highest alerts: detects official Claude / Gemini / GPT releases and major breakthroughs, and notifies you. |
 | `.github/workflows/alerts.yml` | Runs `alerts.py` every 5 minutes on GitHub. |

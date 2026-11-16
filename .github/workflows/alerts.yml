@@ -68,8 +68,12 @@ jobs:
             if [ "$n" = 1 ]; then export ALERT_TEST="$TEST_INPUT"; else export ALERT_TEST=false; fi
             GITHUB_OUTPUT="$out" python alerts.py --state alerts/state.json || echo "Check $n failed; trying again next round."
             grep -q '^changed=true' "$out" && changed=true
+            # A new alert ends this loop early: the state is saved right away (next step), so the website, which
+            # rebuilds itself every 10 minutes, shows the alert within minutes. The next loop starts immediately.
             if grep -q '^new_alerts=true' "$out"; then
-              gh workflow run update-site.yml --repo "$GITHUB_REPOSITORY" -f refresh=false || true
+              rm -f "$out"
+              echo "New alert: saving it now so the website shows it."
+              break
             fi
             rm -f "$out"
             now=$(date +%s)
