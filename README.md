@@ -15,7 +15,12 @@ It also runs as a **website** (GitHub Pages) that you can open on your phone and
 
 GitHub builds and publishes the website for you about every 10 minutes (`.github/workflows/update-site.yml`: each
 run starts the next one, because GitHub's own schedules run hours late), so it stays live without your computer.
-An open page checks for a new build every minute and shows it without a reload. Turn it on once:
+An open page checks for a new build every minute and shows it without a reload.
+
+It is built to keep running without attention: the website updates and the alerts loop restart each other if one
+stops, both re-enable themselves so GitHub does not switch them off after 60 quiet days (after 30 days without a
+commit a small heartbeat file, `.github/heartbeat.txt`, is committed automatically), and if no update succeeds for
+3 hours you get one GitHub issue titled "Website updates have stopped". Turn it on once:
 
 1. On GitHub, open the repository, then **Settings → Pages**.
 2. Under **Build and deployment → Source**, choose **GitHub Actions**.

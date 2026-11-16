@@ -76,6 +76,27 @@ jobs:
               break
             fi
             rm -f "$out"
+
+            # Watchdog for the website. Its updates are a chain of runs (each starts the next), so one is always
+            # queued or running; if none is, the chain broke and is restarted here, within 5 minutes.
+            site=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow update-site.yml --limit 5 --json status --jq '[.[] | select(.status != "completed")] | length' 2>/dev/null || true)
+            if [ "$site" = "0" ]; then
+              echo "Watchdog: no website update is running; restarting the updates."
+              gh workflow run update-site.yml --repo "$GITHUB_REPOSITORY" --ref main || true
+            fi
+            # Once an hour: if no update has succeeded for 3 hours (so restarting did not help), tell the owner
+            # with one GitHub issue. No second issue is opened while that one is still open.
+            if [ $((n % 12)) = 1 ]; then
+              ok=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow update-site.yml --status success --limit 1 --json createdAt --jq '.[0].createdAt // empty' 2>/dev/null || true)
+              if [ -n "$ok" ] && [ $(( $(date +%s) - $(date -d "$ok" +%s) )) -gt 10800 ]; then
+                open=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search 'in:title "Website updates have stopped"' --json number --jq 'length' 2>/dev/null || echo 1)
+                if [ "$open" = "0" ]; then
+                  gh issue create --repo "$GITHUB_REPOSITORY" --title "Website updates have stopped" \
+                    --body "@$GITHUB_REPOSITORY_OWNER The website has had no successful update for more than 3 hours (last one: $ok), and restarting it automatically did not help. Open the Actions tab, look at the newest failed 'Update website' run to see the error, then close this issue once updates work again." || true
+                fi
+              fi
+            fi
+
             now=$(date +%s)
             [ $((now - start + INTERVAL)) -ge "$LOOP_SECONDS" ] && break
             sleep $(( INTERVAL - (now - t0) > 5 ? INTERVAL - (now - t0) : 5 ))
@@ -94,4 +115,16 @@ jobs:
         if: always() && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh workflow run alerts.yml --repo "$GITHUB_REPOSITORY" --ref main
+        run: |
+          set +e
+          # Keep-alive (see update-site.yml): keeps GitHub from switching the workflows off after 60 quiet days
+          for wf in update-site.yml alerts.yml; do
+            gh api -X PUT "repos/$GITHUB_REPOSITORY/actions/workflows/$wf/enable" >/dev/null || echo "Keep-alive: could not re-enable $wf."
+          done
+          for try in 1 2 3 4 5 6; do
+            gh workflow run alerts.yml --repo "$GITHUB_REPOSITORY" --ref main && exit 0
+            echo "Could not start the next loop (try $try); trying again in 30 s."
+            sleep 30
+          done
+          echo "Giving up; the website updates or the hourly schedule will restart this loop."
+          exit 1
