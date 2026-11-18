@@ -243,6 +243,22 @@ details.feeds summary{cursor:pointer;font-size:13.5px;color:var(--ink-2);font-we
 .p2.good{background:var(--good-soft);color:var(--good);border-color:transparent}
 .p2.warn{background:var(--warn-soft);color:var(--warn);border-color:transparent}
 .p2.corro{background:transparent;border-style:dashed}
+.p2.alert{background:var(--bad-soft);color:var(--bad);border-color:transparent}
+.ev.alerted{box-shadow:0 0 0 2px var(--bad),var(--shadow)}
+.xlist{display:flex;flex-direction:column;gap:10px}
+.xpost{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px;display:grid;grid-template-columns:42px minmax(0,1fr);gap:10px}
+.xpost .xav{width:42px;height:42px;border-radius:50%;background:var(--surface-2);overflow:hidden;display:grid;place-items:center;font-weight:700;color:var(--ink-3)}
+.xpost .xav img{width:100%;height:100%;object-fit:cover;display:block}
+.xpost .xhead{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;font-size:13.5px}
+.xpost .xhead b{color:var(--ink)}
+.xpost .xhead .muted{font-size:12.5px}
+.xpost .xtext{margin:4px 0 0;font-size:14.5px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere}
+.xpost .xmedia{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:6px;margin-top:8px}
+.xpost .xmedia img{width:100%;max-height:260px;object-fit:cover;border-radius:8px;display:block;background:var(--surface-2)}
+.xpost .xfoot{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:12.5px;color:var(--ink-3)}
+.xpost .xfoot a{font-weight:600}
+.xsetup ol{margin:6px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
+.xsetup code{font-size:12.5px}
 .ev.unread .ev-title::before,.crow.unread .ev-title::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:7px;vertical-align:2px}
 ul.triage{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:13.5px;color:var(--ink-2)}
 ul.triage b{color:var(--ink);font-weight:650}
@@ -542,6 +558,7 @@ const ICONS = {
   search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14zM20 20l-4-4',
   info: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 11v5M12 7.5v.5',
   news: 'M5 5h11v14H6.5A1.5 1.5 0 0 1 5 17.5zM16 9h3v8.5a1.5 1.5 0 0 1-3 0M8 9h5M8 12.5h5M8 16h3',
+  x: 'M5 4l14 16M19 4L5 20',
 };
 function icon(name, extra = {}) {
   return s('svg', { viewBox: '0 0 24 24', width: 18, height: 18, fill: 'none', stroke: 'currentColor', 'stroke-width': 1.8, 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', ...extra }, s('path', { d: ICONS[name] }));
@@ -752,6 +769,7 @@ function liveSwap(nd) {
   D = nd;
   Object.keys(SX).forEach(k => delete SX[k]);   // lookup tables are rebuilt from the new data on next use
   pollStatus();                                  // sidebar: source times and counts
+  if (app.view === 'x' && $('#xList')) { if (window.scrollY < 300) loadX(true); return; }
   if (app.view !== 'news' || !$('#newsList')) return;   // other pages read the new data the next time they load
   const al = $('#main .alerts'); if (al) al.replaceWith(alertsView());
   updateNewsStatus(); loadNewsFeeds();
@@ -788,6 +806,7 @@ async function staticApi(path, opts = {}) {
   if (p === '/api/news/visit') return sVisit();
   if (p === '/api/news/seen') return sSeen(body);
   if (p === '/api/news/sources') return D.feeds;
+  if (p === '/api/x') return sX(q);
   if (p === '/api/news-runnable') return { items: D.runnable || [] };
   if (p === '/api/news-brief') return method === 'POST' ? sBriefStart() : sBriefGet();
   if ((x = p.match(/^\/api\/news\/(.+)\/(brief|review-card|quickstart)$/))) {
@@ -857,6 +876,17 @@ function sNews(q) {
     total_items: D.news_total, fresh: freshOnX, unread: all.filter(it => !it.seen).length,
     new_since_visit: prev ? all.filter(it => (it.first_seen || '') > prev).length : 0, last_visit: prev,
     category_counts: counts, categories: D.categories };
+}
+function sX(q) {
+  const X = D.x || { items: [], configured: false, accounts: [], providers: {} };
+  const text = (q.get('q') || '').trim().toLowerCase(), group = q.get('group') || 'all', sort = q.get('sort') || 'latest';
+  const limit = clamp(+q.get('limit') || 40, 1, 200), offset = Math.max(0, +q.get('offset') || 0);
+  let rows = X.items || [];
+  if (group === 'lab' || group === 'people') rows = rows.filter(p => p.grp === group);
+  const toks = text.split(/\s+/).filter(Boolean).map(t => t.replace(/^@/, ''));
+  if (toks.length) rows = rows.filter(p => { const hay = `${p.text} ${p.handle} ${p.name}`.toLowerCase(); return toks.every(t => hay.includes(t)); });
+  if (sort === 'top') rows = [...rows].sort((a, b) => (b.likes || 0) - (a.likes || 0) || (b.created_at || '').localeCompare(a.created_at || ''));
+  return { ...X, items: rows.slice(offset, offset + limit), total: rows.length, more: rows.length > offset + limit };
 }
 function sVisit() {
   const v = LS.get('visit', {}), now = nowIso();
@@ -1582,7 +1612,7 @@ function widthOf(el, fallback = 640) { const w = el && el.clientWidth; return w 
    ====================================================================== */
 const app = { status: null, token: 0, cleanup: [], statusTimer: null, wasRefreshing: false, view: '' };
 const NAV = [
-  ['news', 'News', 'news'], ['feed', 'Papers', 'feed'], ['lab', 'Systems Lab', 'lab'], ['graph', 'Evolution graph', 'graph'], ['review', 'Review', 'review'], ['settings', 'Settings', 'settings'],
+  ['news', 'News', 'news'], ['x', 'X (Twitter)', 'x'], ['feed', 'Papers', 'feed'], ['lab', 'Systems Lab', 'lab'], ['graph', 'Evolution graph', 'graph'], ['review', 'Review', 'review'], ['settings', 'Settings', 'settings'],
 ];
 function drawNav() {
   const due = app.status ? app.status.counts.due : 0;
@@ -1592,12 +1622,12 @@ function drawNav() {
 function drawSideStatus() {
   const st = app.status, box = $('#sideStatus');
   if (!st) { box.replaceChildren(h('div', { class: 'src' }, h('span', { class: 'dot error' }), 'Server not reachable')); return; }
-  const short = { huggingface: 'HF papers', arxiv: 'arXiv', github: 'GitHub', news: 'News feeds', models: 'HF models', hn: 'Hacker News' };
+  const short = { huggingface: 'HF papers', arxiv: 'arXiv', github: 'GitHub', news: 'News feeds', models: 'HF models', hn: 'Hacker News', x: 'X posts' };
   box.replaceChildren(
     ...st.sources.map(src => h('div', { class: 'src', title: src.message || '' }, h('span', { class: 'dot ' + src.status }), `${short[src.name] || src.name}: ${src.status === 'running' ? 'fetching…' : ago(src.last_success)}`)),
     h('div', { class: 'src' }, h('span', { class: 'dot ' + (st.gemini.has_key ? 'ok' : 'never') }), st.gemini.has_key ? 'Gemini key set' + (STATIC ? ' (this browser)' : '') : 'No Gemini key'),
-    STATIC ? h('div', { class: 'src', title: 'GitHub rebuilds the website about every 10 minutes; this page checks for a new build every minute and loads it by itself' },
-      h('span', { class: 'dot ' + (liveLate() ? 'offline' : 'ok') }), (liveLate() ? 'Updates delayed · last ' : 'Live · updated ') + ago(D.generated_at)) : null);
+    ...(STATIC ? [h('div', { class: 'src', title: 'GitHub rebuilds the website about every 10 minutes; this page checks for a new build every minute and loads it by itself' },
+      h('span', { class: 'dot ' + (liveLate() ? 'offline' : 'ok') }), (liveLate() ? 'Updates delayed · last ' : 'Live · updated ') + ago(D.generated_at))] : []));
   const stamp = $('#siteStamp'); if (stamp && STATIC) stamp.textContent = siteStampText();
 }
 async function pollStatus() {
@@ -1630,7 +1660,7 @@ function route() {
   main.replaceChildren();
   window.scrollTo(0, 0);
   const ctx = { main, parts, params, token, alive: () => token === app.token };
-  const views = { news: renderNews, feed: renderFeed, paper: renderPaper, lab: renderLab, graph: renderGraph, review: renderReview, settings: renderSettings };
+  const views = { news: renderNews, x: renderX, feed: renderFeed, paper: renderPaper, lab: renderLab, graph: renderGraph, review: renderReview, settings: renderSettings };
   (views[view] || renderNews)(ctx);
 }
 window.addEventListener('hashchange', route);
@@ -1690,6 +1720,7 @@ function sourceCards(names) {
     h('div', { class: 'when' }, 'Last fetched: ', src.last_success ? ago(src.last_success) : 'never', src.last_attempt && src.status !== 'ok' && src.status !== 'running' ? ` · last try ${ago(src.last_attempt)}` : '')));
 }
 function onRefreshDone() {
+  if (app.view === 'x') { if ($('#xList')) loadX(true); return; }
   if (app.view === 'news') {
     loadNewsFeeds();
     // An automatic refresh must not move the page under a reader: further down, offer the fresh list instead.
@@ -1741,7 +1772,7 @@ function drawPaperList() {
     return;
   }
   list.replaceChildren(h('div', { class: 'plist' }, feed.items.map(paperRow)));
-  $('#moreBox').replaceChildren(feed.items.length < feed.total ? h('button', { class: 'btn', onclick: () => loadPapers(false) }, `Load more (${feed.total - feed.items.length} left)`) : null);
+  $('#moreBox').replaceChildren(...(feed.items.length < feed.total ? [h('button', { class: 'btn', onclick: () => loadPapers(false) }, `Load more (${feed.total - feed.items.length} left)`)] : []));
 }
 function paperRow(p) {
   const state = p.analyzed ? h('span', { class: 'badge good' }, p.analysis_origin === 'starter' ? 'Starter breakdown' : 'Analyzed')
@@ -1860,7 +1891,7 @@ function drawViewBar() {
     news.lastVisit ? h('span', { class: 'muted small' }, 'Last visit ' + ago(news.lastVisit)) : null);
 }
 async function markViewSeen() {
-  const ids = news.items.flatMap(it => [it.id, ...(it.related || []).map(r => r.id)]);
+  const ids = news.items.flatMap(it => [it.id, ...(it.related || []).map(r => r.id), ...(it.hidden_ids || [])]);
   if (!ids.length) return;
   try {
     const r = await api('/api/news/seen', { method: 'POST', body: { ids } });
@@ -1871,7 +1902,8 @@ async function markViewSeen() {
 function markSeen(it, seen = true) {
   if (it.seen === seen) return;
   it.seen = seen;
-  api('/api/news/seen', { method: 'POST', body: { ids: [it.id], seen } }).then(r => { news.unread = r.unread; drawViewBar(); }).catch(() => {});
+  // hidden_ids: re-posted copies of this story from the same source (not shown), so they never count as unread
+  api('/api/news/seen', { method: 'POST', body: { ids: [it.id, ...(it.hidden_ids || [])], seen } }).then(r => { news.unread = r.unread; drawViewBar(); }).catch(() => {});
 }
 function drawCatBar() {
   const bar = $('#catBar'); if (!bar) return;
@@ -1927,7 +1959,111 @@ function drawNews() {
   list.replaceChildren(news.layout === 'compact'
     ? h('div', { class: 'clist' }, news.items.map(it => newsRow(it)))
     : h('div', { class: 'ngrid' }, news.items.map((it, i) => newsCard(it, leadOk && i === 0))));
-  $('#newsMore').replaceChildren(news.more ? h('button', { class: 'btn', onclick: () => loadNews(false) }, 'Load more') : null);
+  $('#newsMore').replaceChildren(...(news.more ? [h('button', { class: 'btn', onclick: () => loadNews(false) }, 'Load more')] : []));
+}
+
+/* ======================================================================
+   X (Twitter): posts from AI labs and researchers. The server (or the website build) reads them with the
+   user's own API key; without a key this page explains the two options and what they cost.
+   ====================================================================== */
+const xs = { q: '', group: 'all', sort: 'latest', items: [], more: false, req: 0, info: null };
+try { xs.sort = localStorage.getItem('wb.xSort') || 'latest'; } catch (e) { /* storage unavailable */ }
+function renderX(ctx) {
+  let timer = null;
+  const input = h('input', { type: 'search', placeholder: 'Search posts and accounts…', value: xs.q, 'aria-label': 'Search X posts',
+    oninput: () => { clearTimeout(timer); timer = setTimeout(() => { xs.q = input.value; loadX(true); }, 280); } });
+  const sortSel = h('select', { 'aria-label': 'Sort', onchange: () => { xs.sort = sortSel.value; try { localStorage.setItem('wb.xSort', xs.sort); } catch (e) { /* ignore */ } loadX(true); } },
+    [['latest', 'Latest first'], ['top', 'Most liked']].map(([v, t]) => h('option', { value: v }, t)));
+  sortSel.value = xs.sort;
+  ctx.main.append(
+    h('header', { class: 'view-head' },
+      h('div', null, h('h1', null, 'X (Twitter)'),
+        h('p', { class: 'sub' }, 'Posts from AI labs and researchers on X, newest first. Replies and reposts are left out.'),
+        h('p', { class: 'small', id: 'xStamp' })),
+      STATIC ? null : h('button', { class: 'btn primary', id: 'xRefresh', onclick: refreshX }, icon('refresh'), h('span', null, 'Refresh'))),
+    h('div', { id: 'xSetup' }),
+    h('div', { class: 'toolbar', style: { marginTop: '6px' } }, h('label', { class: 'search' }, icon('search'), input), sortSel),
+    h('div', { class: 'toolbar', id: 'xGroups' }),
+    h('p', { class: 'listmeta', id: 'xMeta' }),
+    h('div', { id: 'xList' }, h('div', { class: 'loading' }, 'Loading posts…')),
+    h('div', { id: 'xMore', style: { textAlign: 'center', marginTop: '14px' } }));
+  loadX(true);
+}
+async function refreshX() {
+  try { const r = await api('/api/refresh', { method: 'POST', body: { sources: ['x'] } }); toast(r.started ? 'Reading new posts from X…' : r.message); app.wasRefreshing = true; pollStatus(); }
+  catch (e) { toast(e.message, 'bad'); }
+}
+async function loadX(reset = true) {
+  const req = ++xs.req, offset = reset ? 0 : xs.items.length;
+  try {
+    const r = await api('/api/x?' + new URLSearchParams({ q: xs.q, group: xs.group, sort: xs.sort, limit: 40, offset }));
+    if (req !== xs.req || !$('#xList')) return;
+    xs.info = r; xs.items = reset ? r.items : xs.items.concat(r.items); xs.more = r.more;
+    drawX();
+  } catch (e) { if ($('#xList')) $('#xList').replaceChildren(h('div', { class: 'note bad' }, e.message)); }
+}
+function drawX() {
+  const r = xs.info, list = $('#xList'); if (!r || !list) return;
+  const src = r.source || {};
+  $('#xStamp').textContent = r.configured || src.last_success
+    ? [src.last_success ? 'Last read ' + ago(src.last_success) : null, src.message || r.provider_label].filter(Boolean).join(' · ')
+    : '';
+  const setup = $('#xSetup');
+  if (!r.configured && !(r.items || []).length && !src.last_success) setup.replaceChildren(xSetupCard(r));
+  else if (src.status && !['ok', 'running', 'never'].includes(src.status)) setup.replaceChildren(h('div', { class: 'note ' + (src.status === 'rate_limited' ? 'warn' : 'bad') }, src.message || 'X could not be read.'));
+  else setup.replaceChildren();
+  $('#xGroups').replaceChildren(seg([['all', 'All'], ['lab', 'AI labs'], ['people', 'People']], xs.group, v => { xs.group = v; loadX(true); }),
+    h('span', { class: 'muted small' }, `${(r.accounts || []).length} accounts: ` + (r.accounts || []).slice(0, 8).map(a => '@' + a.handle).join(', ') + ((r.accounts || []).length > 8 ? ' …' : '')));
+  $('#xMeta').textContent = r.total ? `${r.total} post${r.total === 1 ? '' : 's'} from the last 7 days${xs.q ? ` matching “${xs.q}”` : ''}` : '';
+  if (!xs.items.length) {
+    list.replaceChildren(r.configured || src.last_success ? h('div', { class: 'card empty' }, xs.q || xs.group !== 'all' ? 'No posts match.' : 'No posts yet. New posts appear after the next update.') : h('div'));
+  } else list.replaceChildren(h('div', { class: 'xlist' }, xs.items.map(xPost)));
+  $('#xMore').replaceChildren(...(xs.more ? [h('button', { class: 'btn', onclick: () => loadX(false) }, 'Load more')] : []));
+}
+function xRich(text) {
+  // links and @handles become links; everything else stays plain text (never parsed as HTML)
+  return text.split(/(https?:\/\/[^\s]+|@[A-Za-z0-9_]{1,15}\b)/g).filter(Boolean).map(part => {
+    if (part.startsWith('@')) return h('a', { href: 'https://x.com/' + part.slice(1), target: '_blank', rel: 'noopener noreferrer' }, part);
+    const u = /^https?:\/\//.test(part) && safeUrl(part.replace(/[).,;!?]+$/, ''));
+    return u ? h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, u.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60)) : part;
+  });
+}
+function xPost(p) {
+  const url = safeUrl(p.url), av = safeUrl(p.avatar);
+  const initial = (p.name || p.handle || '?')[0].toUpperCase();
+  const avatar = h('div', { class: 'xav' }, av ? h('img', { src: av, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer', onerror: e => e.target.replaceWith(initial) }) : initial);
+  const stat = (n, label, title) => n ? h('span', { title }, `${label} ${compact(n)}`) : null;
+  return h('article', { class: 'xpost' },
+    avatar,
+    h('div', null,
+      h('div', { class: 'xhead' }, h('b', null, p.name || p.handle), p.verified ? h('span', { title: 'Verified on X' }, '✓') : null,
+        h('a', { class: 'muted', href: 'https://x.com/' + p.handle, target: '_blank', rel: 'noopener noreferrer' }, '@' + p.handle),
+        h('span', { class: 'muted', title: new Date(p.created_at).toLocaleString() }, '· ' + ago(p.created_at)),
+        p.grp === 'lab' ? p2('AI lab', 'src-lab') : null),
+      h('p', { class: 'xtext' }, xRich(p.text || '')),
+      (p.media || []).length ? h('div', { class: 'xmedia' }, p.media.map(m => safeUrl(m.url) ? h('a', { href: url || m.url, target: '_blank', rel: 'noopener noreferrer' },
+        h('img', { src: m.url, alt: m.type === 'video' ? 'Video preview' : 'Image', loading: 'lazy', referrerpolicy: 'no-referrer', onerror: e => e.target.closest('a').remove() })) : null)) : null,
+      h('div', { class: 'xfoot' }, stat(p.likes, '♥', 'Likes'), stat(p.reposts, '↻', 'Reposts'), stat(p.replies, '💬', 'Replies'), stat(p.views, '👁', 'Views'),
+        url ? h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, 'Open on X ↗') : null)));
+}
+function xSetupCard(r) {
+  const prov = r.providers || {}, cap = r.cap || 100;
+  const month = per => `about $${(cap * 30 * per).toFixed(cap * 30 * per < 1 ? 2 : 0)}/month at most`;
+  const repo = STATIC && D && D.repo ? D.repo : null;
+  const ext = (label, href) => h('a', { href, target: '_blank', rel: 'noopener noreferrer' }, label + ' ↗');
+  return h('section', { class: 'card xsetup' },
+    h('h2', { style: { marginBottom: '6px' } }, 'Connect X'),
+    h('p', { class: 'small', style: { margin: 0 } }, `Reading posts from X needs an API key; X no longer offers free reading. Both options below are pay-per-use, and the app reads at most ${cap} posts a day (you can change that), so the cost has a ceiling:`),
+    h('ol', { class: 'small' },
+      h('li', null, h('b', null, 'Official X API'), ` — $${(prov.x || {}).per_post || 0.005} per post read, ${month((prov.x || {}).per_post || 0.005)}. Create an app at `, ext('developer.x.com', 'https://developer.x.com'),
+        ', buy credits, set a spending limit, and copy the app\'s Bearer Token. ', ext('Pricing', 'https://docs.x.com/x-api/getting-started/pricing')),
+      h('li', null, h('b', null, 'twitterapi.io'), ` — an unofficial service, about $0.15 per 1,000 posts (${month((prov.twitterapi || {}).per_post || 0.00015)}); new accounts get $1 of free credit. Sign up at `, ext('twitterapi.io', 'https://twitterapi.io'), ' and copy the API key.')),
+    h('p', { class: 'small', style: { margin: '10px 0 0' } }, h('b', null, 'Where to put the key')),
+    h('ol', { class: 'small' },
+      h('li', null, 'Website (phone and computer): GitHub → your repository → Settings → Secrets and variables → Actions → ', h('b', null, 'New repository secret'), ' named ', h('code', null, 'X_API_KEY'),
+        '. For twitterapi.io also add, on the Variables tab, ', h('code', null, 'X_API_PROVIDER'), ' = ', h('code', null, 'twitterapi'), '. Posts appear here within about 10 minutes, and the desktop app then shows them too without a key of its own.',
+        repo ? [' ', ext('Open the secrets page', `https://github.com/${repo}/settings/secrets/actions`)] : null),
+      STATIC ? null : h('li', null, 'Or only on this computer: ', h('a', { href: '#/settings' }, 'Settings → X (Twitter)'), '.')));
 }
 
 /* --- Highest alerts (website): official model releases and major breakthroughs, found by alerts.py --- */
@@ -2034,7 +2170,8 @@ const pillRow = pills => h('div', { class: 'pills2' }, pills.filter(Boolean).fla
 function newsPills(it) {
   const m = it.metrics || {}, sp = it.specs || {}, ip = it.importance_parts || {};
   const st = STYPE[it.source_type] || it.source_type;
-  const out = [p2(st === it.source_name ? st : `${st} · ${it.source_name}`, 'src-' + it.source_type)];
+  const out = [m.alert ? p2(m.alert === 'release' ? '🚨 New model' : '🚨 Breakthrough', 'alert', 'Highest alert: ' + (m.alert === 'release' ? 'an official model release' : 'a major AI breakthrough')) : null,
+    p2(st === it.source_name ? st : `${st} · ${it.source_name}`, 'src-' + it.source_type)];
   if (it.kind === 'model') {
     const created = it.published ? fmtDate(it.published) : null;
     if (m.model_status === 'new' || (m.new_release && !m.model_status)) out.push(p2('New release', 'good', created ? 'Created ' + created : ''));
@@ -2149,7 +2286,7 @@ function newsCard(it, lead) {
   if (it.kind === 'discussion') img.append(h('span', { class: 'kind' }, 'Hacker News thread'));
   if (it.kind === 'repo') img.append(h('span', { class: 'kind' }, it.id.startsWith('ghrel:') ? 'GitHub release' : 'New GitHub repo'));
   img.addEventListener('click', () => markSeen(it));
-  const el = h('article', { class: 'ev' + (lead ? ' lead' : '') + (it.seen ? '' : ' unread') },
+  const el = h('article', { class: 'ev' + (lead ? ' lead' : '') + (it.seen ? '' : ' unread') + ((it.metrics || {}).alert ? ' alerted' : '') },
     img,
     h('div', { class: 'ev-body' },
       h('div', { class: 'ev-src' }, when ? h('span', { title: new Date(when).toLocaleString() }, ago(when)) : null, freshBadge(when),
@@ -3147,10 +3284,43 @@ function renderSiteSettings(ctx) {
       h('div', { class: 'feedlist' }, D.sources.map(s => h('span', { title: s.message || '' }, h('span', { class: 'dot ' + (s.status || 'never') }), `${s.label || s.name}: ${s.last_success ? ago(s.last_success) : 'never'}`))),
       h('p', { class: 'small muted' }, 'GitHub Actions rebuilds the website about every 10 minutes, and open pages load each update by themselves. ', u ? ['If it falls behind: ', h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, 'Update website ↗'), ' → Run workflow.'] : ''),
       h('p', { class: 'small muted', style: { marginBottom: 0 } }, 'Optional: add your Gemini key as a repository secret named GEMINI_API_KEY (GitHub → Settings → Secrets and variables → Actions) and about every 4 hours an update also writes the Frontier Brief, triages the top stories and breaks down 2 top papers for everyone who opens the site.')),
+    D.x && D.x.configured
+      ? h('section', { class: 'card' }, h('h2', { style: { marginBottom: '8px' } }, 'X (Twitter)'),
+        h('p', { class: 'small', style: { margin: 0 } }, `Connected with ${D.x.provider_label}: ${(D.x.accounts || []).length} accounts, ${D.x.reads_today || 0} of at most ${D.x.cap} posts read today (about $${D.x.max_month_usd}/month at the most). `,
+          h('a', { href: '#/x' }, 'Open the X page'), '.'))
+      : xSetupCard(D.x || {}),
     h('section', { class: 'card' }, h('h2', { style: { marginBottom: '8px' } }, 'This browser'),
       h('p', { class: 'small muted', style: { marginTop: 0 } }, 'Erase your review progress, read marks, Gemini breakdowns, review cards and key from this browser. The website itself is not affected.'),
       clearBtn)));
 }
+function xSettingsCard(st, save) {
+  const x = st.x || {};
+  const err = h('div', { class: 'note bad hidden', role: 'alert' });
+  const provSel = h('select', { 'aria-label': 'X provider' }, Object.entries(x.providers || {}).map(([k, v]) => h('option', { value: k }, `${v.label} — $${v.per_post} per post`)));
+  provSel.value = x.provider || 'x';
+  const keyInput = h('input', { type: 'password', autocomplete: 'off', spellcheck: 'false', 'aria-label': 'X API key',
+    placeholder: x.configured ? `Saved key ${x.key_hint || ''} (paste a new one to replace it)` : 'Paste an X Bearer Token or a twitterapi.io key' });
+  const capN = h('input', { type: 'number', min: 10, max: 5000, value: x.cap || 100, style: { width: '110px' } });
+  const acctTa = h('textarea', { rows: 6, spellcheck: 'false', 'aria-label': 'X accounts' });
+  acctTa.value = x.accounts_text || '';
+  const cost = h('div', { class: 'help' });
+  const drawCost = () => { const per = ((x.providers || {})[provSel.value] || {}).per_post || 0; const m = (+capN.value || 0) * 30 * per; cost.textContent = `At most ${+capN.value || 0} posts a day: about $${m < 1 ? m.toFixed(2) : m.toFixed(0)} a month at the most (usually less: only new posts are read).`; };
+  provSel.addEventListener('change', drawCost); capN.addEventListener('input', drawCost); drawCost();
+  return h('section', { class: 'card' }, h('h2', { style: { marginBottom: '6px' } }, 'X (Twitter)'),
+    h('p', { class: 'small muted', style: { marginTop: 0 } }, x.configured ? `Reading ${(x.accounts || []).length} accounts with ${x.provider_label}; ${x.reads_today || 0} posts read today.`
+      : 'No key on this computer. If your website has the X_API_KEY secret, the X page still shows its posts here for free.'),
+    h('div', { class: 'field' }, h('label', null, 'Service'), provSel),
+    h('div', { class: 'field' }, h('label', null, 'API key'),
+      h('div', { class: 'row' }, keyInput,
+        h('button', { class: 'btn primary', onclick: async () => { const v = keyInput.value.trim(); if (!v) { err.textContent = 'Paste a key first.'; err.classList.remove('hidden'); return; } if (await save({ x_api_key: v, x_provider: provSel.value }, 'X key saved. Posts load on the next refresh.', err)) { keyInput.value = ''; renderSettingsAgain(); } } }, 'Save key'),
+        x.configured ? h('button', { class: 'btn danger', onclick: async () => { if (confirm('Remove the saved X key from this computer?')) { await save({ clear_x_key: true }, 'X key removed.'); renderSettingsAgain(); } } }, 'Remove') : null),
+      err, h('div', { class: 'help' }, 'Official X API: developer.x.com → your app → Keys and tokens → Bearer Token (needs credits). twitterapi.io: the key on your dashboard. The key stays in workbench.db on this computer.')),
+    h('div', { class: 'field' }, h('label', null, 'Posts read per day (cost ceiling)'), capN, cost),
+    h('div', { class: 'field' }, h('label', null, 'Accounts (one per line: handle, then lab or people)'), acctTa,
+      h('div', { class: 'help' }, 'Empty the box and save to go back to the default list.')),
+    h('button', { class: 'btn primary', onclick: () => save({ x_provider: provSel.value, x_daily_cap: +capN.value, x_accounts: acctTa.value.split('\n').map(s => s.trim()).filter(Boolean) }, 'X settings saved.').then(ok => ok && renderSettingsAgain()) }, 'Save'));
+}
+function renderSettingsAgain() { if (app.view === 'settings') route(); }
 async function renderSettings(ctx) {
   if (STATIC) return renderSiteSettings(ctx);
   const { main } = ctx;
@@ -3198,6 +3368,7 @@ async function renderSettings(ctx) {
         modelMsg),
       h('div', { class: 'field' }, h('label', { class: 'check' }, fallbackBox, 'When the model is overloaded, retry and then use another Flash model'),
         h('div', { class: 'help' }, 'Google sometimes answers "HTTP 503: experiencing high demand". The app retries twice with a short wait, then tries one other Flash model your key can use (chosen from Google\'s model list). The page shows which model answered.'))),
+    xSettingsCard(st, save),
     h('section', { class: 'card' }, h('h2', { style: { marginBottom: '14px' } }, 'Live ingestion'),
       h('div', { class: 'field' }, h('label', { class: 'check' }, fetchBox, 'Fetch all sources when the server starts')),
       h('div', { class: 'field' }, h('label', { class: 'check' }, figBox, 'Download paper figures from arXiv in the background'),

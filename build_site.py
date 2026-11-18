@@ -29,7 +29,8 @@ HERE = Path(__file__).resolve().parent
 PLACEHOLDER = "<!-- STATIC_DATA -->"
 KEEP_SETTINGS = ("news_sync_at", "news_visit_last", "news_visit_prev", "new_per_day", "score_version",
                  "gh_releases_last", "arxiv_max_results", "hf_limit", "custom_feeds",
-                 "site_gemini_last", "site_gemini_report")
+                 "site_gemini_last", "site_gemini_report", "x_provider", "x_accounts", "x_daily_cap")
+KEEP_PREFIXES = ("feed_baseline:", "xstate_")   # undated-feed memory; X read positions and today's read count
 
 
 def copy_database(src: Path, dst: Path) -> None:
@@ -37,7 +38,9 @@ def copy_database(src: Path, dst: Path) -> None:
     d = sqlite3.connect(str(dst))
     s.backup(d)
     s.close()
-    d.execute(f"DELETE FROM settings WHERE key NOT IN ({','.join('?' for _ in KEEP_SETTINGS)})", KEEP_SETTINGS)
+    prefixes = " AND ".join("substr(key, 1, ?) != ?" for _ in KEEP_PREFIXES)
+    d.execute(f"DELETE FROM settings WHERE key NOT IN ({','.join('?' for _ in KEEP_SETTINGS)}) AND {prefixes}",
+              (*KEEP_SETTINGS, *[v for p in KEEP_PREFIXES for v in (len(p), p)]))
     d.commit()
     d.close()
 
@@ -74,6 +77,8 @@ def main() -> int:
     key = os.environ.get("WORKBENCH_GEMINI_KEY", "").strip()
     os.environ["WORKBENCH_DB"] = str(work)
     os.environ["WORKBENCH_NO_FETCH"] = "1"
+    os.environ["WORKBENCH_SITE_URL"] = ""   # this build *is* the website: never read alerts/X back from it
+    # The X key (secret X_API_KEY -> WORKBENCH_X_KEY) is read from the environment only, never stored in the database.
     if not key:
         os.environ["WORKBENCH_GEMINI_BASE"] = "http://127.0.0.1:9/gemini-disabled"   # nothing can reach Gemini
     sys.path.insert(0, str(HERE))
@@ -82,6 +87,13 @@ def main() -> int:
     S.init_db()
     S.seed_starter()
     S.backfill_scores()
+    # Highest alerts (new Claude/Gemini/GPT models, breakthroughs) also go on the News page
+    raw_alerts = load_alerts(Path(args.alerts))
+    n_alerts = S.ingest_alerts(raw_alerts)
+    if n_alerts:
+        print(f"Alerts: {n_alerts} alert(s) added to the News page.")
+    if not args.refresh:
+        S.rescore_news()
     gemini_report: dict = {"enabled": bool(key), "note": "no Gemini step in this build (republish only)" if key else "no GEMINI_API_KEY secret"}
     # Builds run every few minutes; Gemini (free quota) only joins every --gemini-every hours. In between, the
     # key is not even loaded and the website keeps showing the report of the last Gemini build.
@@ -113,7 +125,7 @@ def main() -> int:
         raise SystemExit("Refusing to continue: the working database still holds a Gemini key.")
 
     data = build_snapshot(S, args.max_papers)
-    data["alerts"] = load_alerts(Path(args.alerts))
+    data["alerts"] = raw_alerts
     data["gemini"] = gemini_report
     write_site(Path(args.site), data)
     if args.save_db:
@@ -301,7 +313,17 @@ def build_snapshot(S, max_papers: int) -> dict:
         "graph": S.graph(),
         "questions": questions,
         "settings": {"new_per_day": S.setting_int("new_per_day", 0, 500)},
+        "x": x_snapshot(S),
     }
+
+
+def x_snapshot(S) -> dict:
+    """X posts for the website's X page (and x.json, which the desktop app reads when it has no key of its own)."""
+    items, total = S.x_items(limit=400)
+    info = S.x_info()   # provider, cap, accounts, read count: never the key
+    with S.db() as c:
+        src = c.execute("SELECT status, message, last_success FROM sources WHERE name='x'").fetchone()
+    return {**info, "items": items, "total": total, "source": dict(src) if src else None}
 
 
 def load_alerts(path: Path) -> list[dict]:
@@ -310,7 +332,7 @@ def load_alerts(path: Path) -> list[dict]:
         state = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    keep = ("kind", "vendor", "name", "title", "url", "source", "published", "detected", "evidence")
+    keep = ("kind", "vendor", "key", "name", "title", "url", "source", "published", "detected", "evidence")
     return [{k: a.get(k) for k in keep} for a in state.get("alerts", [])[:20]]
 
 
@@ -328,6 +350,11 @@ def write_site(site: Path, data: dict) -> None:
     # Open pages fetch this small file once a minute and load the new data.js when generated_at changes.
     (site / "version.json").write_text(json.dumps({"generated_at": data["generated_at"], "news_sync_at": data.get("news_sync_at"),
                                                    "news": len(data["news"])}), encoding="utf-8")
+    # Small side files for the desktop app (server.py reads them when it has no X key / no alerts job of its own)
+    (site / "alerts.json").write_text(json.dumps({"generated_at": data["generated_at"], "alerts": data.get("alerts") or []},
+                                                 ensure_ascii=False), encoding="utf-8")
+    (site / "x.json").write_text(json.dumps({"generated_at": data["generated_at"], **(data.get("x") or {})},
+                                            ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     (site / "index.html").write_text(html, encoding="utf-8")
     (site / ".nojekyll").write_text("", encoding="utf-8")
     print(f"Website written to {site}: {len(data['news'])} news events, {len(data['papers'])} papers, "

@@ -70,6 +70,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKBENCH_GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # X page (optional): secret X_API_KEY = an X API bearer token, or a twitterapi.io key with the repository
+          # variable X_API_PROVIDER = twitterapi. Optional variables: X_DAILY_CAP (posts per day, default 100) and
+          # X_ACCOUNTS ("AnthropicAI:lab, karpathy:people, ...").
+          WORKBENCH_X_KEY: ${{ secrets.X_API_KEY }}
+          WORKBENCH_X_PROVIDER: ${{ vars.X_API_PROVIDER }}
+          WORKBENCH_X_DAILY_CAP: ${{ vars.X_DAILY_CAP }}
+          WORKBENCH_X_ACCOUNTS: ${{ vars.X_ACCOUNTS }}
           REFRESH: ${{ (github.event_name != 'workflow_dispatch' || inputs.refresh) && '--refresh' || '' }}
         run: python build_site.py --db ci-data/workbench.db --save-db ci-data/workbench.db --site site --alerts alerts/state.json --figures 2 --gemini-every 4 $REFRESH
 

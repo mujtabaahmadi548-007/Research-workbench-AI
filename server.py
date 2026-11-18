@@ -337,11 +337,32 @@ CREATE TABLE IF NOT EXISTS news_sources (
     last_attempt TEXT,
     last_success TEXT
 );
+CREATE TABLE IF NOT EXISTS xposts (
+    id         TEXT PRIMARY KEY,
+    handle     TEXT NOT NULL,
+    name       TEXT,
+    avatar     TEXT,
+    verified   INTEGER NOT NULL DEFAULT 0,
+    text       TEXT NOT NULL,
+    url        TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    likes      INTEGER,
+    reposts    INTEGER,
+    replies    INTEGER,
+    quotes     INTEGER,
+    views      INTEGER,
+    media      TEXT NOT NULL DEFAULT '[]',
+    links      TEXT NOT NULL DEFAULT '[]',
+    first_seen TEXT NOT NULL,
+    grp        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_xposts_created ON xposts(created_at);
 """
 
 SOURCE_NAMES = {
     "huggingface": "Hugging Face Daily Papers", "arxiv": "arXiv (cs.AI, cs.CL, cs.LG)", "github": "GitHub releases & repos",
     "news": "AI news feeds", "models": "Hugging Face trending models", "hn": "Hacker News (AI stories)",
+    "x": "X (Twitter) posts",
 }
 PAPER_SOURCES = ["huggingface", "arxiv", "github"]
 NEWS_SOURCES = ["news", "models", "hn"]
@@ -1496,27 +1517,42 @@ def fetch_github(force: bool = False) -> None:
 # ---------------------------------------------------------------------------
 # AI news, model releases and community discussion
 # ---------------------------------------------------------------------------
-# (key, name, feed URL, type). All checked to answer with fresh items. Labs without a public feed
-# (e.g. Anthropic, Meta AI, Mistral) can be added in Settings if they publish one.
+# (key, name, feed URL, type). All checked to answer with fresh items (last checked 2026-11-19). Anthropic has no
+# RSS feed, so its news page is read directly (HTML_FEEDS). Meta AI and xAI have neither a feed nor a usable page.
 NEWS_FEEDS: list[tuple[str, str, str, str]] = [
     ("openai", "OpenAI", "https://openai.com/news/rss.xml", "lab"),
+    ("anthropic", "Anthropic", "https://www.anthropic.com/news", "lab"),
     ("deepmind", "Google DeepMind", "https://deepmind.google/blog/rss.xml", "lab"),
     ("google_ai", "Google AI", "https://blog.google/technology/ai/rss/", "lab"),
+    ("google_dev", "Google Developers Blog", "https://developers.googleblog.com/feeds/posts/default", "lab"),
     ("google_research", "Google Research", "https://research.google/blog/rss/", "lab"),
+    ("mistral", "Mistral AI", "https://mistral.ai/news/rss", "lab"),
     ("msr", "Microsoft Research", "https://www.microsoft.com/en-us/research/feed/", "lab"),
+    ("apple_ml", "Apple Machine Learning Research", "https://machinelearning.apple.com/rss.xml", "lab"),
     ("nvidia", "NVIDIA Blog", "https://blogs.nvidia.com/feed/", "lab"),
     ("nvidia_dev", "NVIDIA Developer", "https://developer.nvidia.com/blog/feed", "lab"),
     ("hf_blog", "Hugging Face Blog", "https://huggingface.co/blog/feed.xml", "lab"),
+    ("together", "Together AI", "https://www.together.ai/blog/rss.xml", "lab"),
+    ("ollama", "Ollama", "https://ollama.com/blog/rss.xml", "lab"),
+    ("github_ai", "GitHub Blog (AI & ML)", "https://github.blog/ai-and-ml/feed/", "lab"),
     ("aws_ml", "AWS Machine Learning", "https://aws.amazon.com/blogs/machine-learning/feed/", "lab"),
+    ("bair", "Berkeley AI Research", "https://bair.berkeley.edu/blog/feed.xml", "lab"),
     ("techcrunch", "TechCrunch AI", "https://techcrunch.com/category/artificial-intelligence/feed/", "press"),
     ("verge", "The Verge AI", "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml", "press"),
+    ("decoder", "The Decoder", "https://the-decoder.com/feed/", "press"),
     ("mittr", "MIT Technology Review", "https://www.technologyreview.com/topic/artificial-intelligence/feed", "press"),
     ("ars", "Ars Technica AI", "https://arstechnica.com/ai/feed/", "press"),
+    ("wired", "Wired AI", "https://www.wired.com/feed/tag/ai/latest/rss", "press"),
+    ("ieee", "IEEE Spectrum AI", "https://spectrum.ieee.org/feeds/topic/artificial-intelligence.rss", "press"),
     ("marktechpost", "MarkTechPost", "https://www.marktechpost.com/feed/", "press"),
     ("simonw", "Simon Willison", "https://simonwillison.net/atom/everything/", "analysis"),
-    ("importai", "Import AI", "https://importai.substack.com/feed", "analysis"),
+    ("importai", "Import AI", "https://jack-clark.net/feed/", "analysis"),   # importai.substack.com answers 403
     ("latentspace", "Latent Space", "https://www.latent.space/feed", "analysis"),
     ("interconnects", "Interconnects", "https://www.interconnects.ai/feed", "analysis"),
+    ("zvi", "Zvi Mowshowitz", "https://thezvi.wordpress.com/feed/", "analysis"),
+    ("raschka", "Ahead of AI (Raschka)", "https://magazine.sebastianraschka.com/feed", "analysis"),
+    ("mollick", "One Useful Thing (Mollick)", "https://www.oneusefulthing.org/feed", "analysis"),
+    ("lastweekinai", "Last Week in AI", "https://lastweekin.ai/feed", "analysis"),
 ]
 NEWS_MAX_AGE = timedelta(days=21)    # ignore feed items older than this
 NEWS_PER_FEED = 25                   # newest items kept per feed per refresh (OpenAI's feed has 1,000+)
@@ -1634,6 +1670,29 @@ def parse_feed(xml_bytes: bytes) -> list[dict]:
     return out
 
 
+def anthropic_news_items(page: str) -> list[dict]:
+    """anthropic.com/news has no feed: each post is a link around a heading, with its date in the <time> just before."""
+    out: dict[str, dict] = {}
+    for m in re.finditer(r'<a[^>]*href="(/[^"#?]+)"[^>]*>\s*<h[1-4][^>]*>(.*?)</h[1-4]>(.{0,1500}?)</a>', page, re.S):
+        url = "https://www.anthropic.com" + m.group(1)
+        title = strip_html(m.group(2))
+        if not title or url in out:
+            continue
+        times = re.findall(r"<time[^>]*>([^<]+)</time>", page[max(0, m.start() - 1500):m.start()])
+        published = None
+        if times:
+            try:
+                published = iso(datetime.strptime(times[-1].strip(), "%b %d, %Y").replace(tzinfo=timezone.utc, hour=12))
+            except ValueError:
+                published = parse_date_any(times[-1])
+        out[url] = {"title": title, "url": url, "summary": clean_summary(strip_html(m.group(3)))[:600],
+                    "published": published, "author": None, "image": None}
+    return list(out.values())
+
+
+HTML_FEEDS = {"anthropic": anthropic_news_items}   # feed key -> parser for sites without RSS
+
+
 def canonical_url(url: str) -> str:
     p = urlparse(url.strip())
     query = "&".join(q for q in p.query.split("&") if q and not q.lower().startswith(("utm_", "ref=", "source=", "fbclid", "gclid")))
@@ -1664,14 +1723,97 @@ _PROJECT_NAMES = sorted(
 _PROJECT_TOKEN = re.compile(r"(?<![\w.\-])(" + "|".join(re.escape(n) for n in _PROJECT_NAMES) + r")\s*[:\-]?\s*v?(\d+)\.(\d+)", re.I)
 
 
+_DASHES = str.maketrans({c: "-" for c in "‐‑‒–—―−"})   # "GPT‑6.2" uses U+2011
+_QUOTES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"'})
+# Words after a version number that are not a model's variant name ("Gemini 4 With ..." in Title Case headlines)
+_NOT_VARIANT = set("""a an and or the with without for in on at to from by of is are was be been now gets get brings
+    adds launches launch launched released release releases arrives arrived available beats tops vs versus review
+    hands first new model models api apis app apps update updates preview can will may could scores takes makes shows
+    sets hits leads wins comes goes outperforms explained explainer benchmark benchmarks pricing price rolls out here
+    today live family series system card report technical paper test tested early impressions deep dive what how why
+    when where who which that this these those it its has have had as but not after before into over under about just
+    also more most than then only all is isn't doesn't vs. via plus minus inside powers powered support supports now
+    nears tops crushes stuns lands debuts ships gpt gemini gemma claude llama qwen deepseek mistral grok kimi glm
+    minimax""".split())   # brand names: "GPT-6.2 Astra and GPT-6.2 Sol" must not make "gpt" a variant
+_VARIANT_AFTER = re.compile(r"[ \-]+([A-Za-z][A-Za-z0-9]*)(?:\s+(?:and|&|/)\s+([A-Za-z][A-Za-z0-9]*))?")
+_KNOWN_VARIANTS = {"pro", "flash", "ultra", "nano", "mini", "lite", "max", "turbo", "plus", "omni", "instruct", "thinking",
+                   "coder", "vision", "air", "small", "medium", "large", "codex", "spark"}
+
+
+def _variant_ok(word: Optional[str]) -> bool:
+    return bool(word) and word.lower() not in _NOT_VARIANT and (word[0].isupper() or word.lower() in _KNOWN_VARIANTS)
+
+
 def story_tokens(title: str) -> set[str]:
+    """Model/product tokens that tie reports about one release together: 'gpt6.2', or 'gemini4~neon' when the title
+    names the variant ('Gemini 4 Neon'). A plain 'gemini4' matches any Gemini 4 variant; two different variants
+    ('Gemini 4 Neon' and 'Gemini 4 Hydrogen') are different models and never match (see tokens_match)."""
+    title = (title or "").translate(_DASHES)
     out = set()
     for m in _STORY_TOKEN.finditer(title):
         brand = re.sub(r"[\s\-]", "", m.group(1).lower())
-        out.add(brand.rstrip("v") + m.group(2))
+        base = brand.rstrip("v") + m.group(2)
+        v = _VARIANT_AFTER.match(title, m.end())
+        variants = [w.lower() for w in (v.groups() if v else ()) if _variant_ok(w)]
+        if variants:
+            out.update(f"{base}~{w}" for w in variants)
+        else:
+            out.add(base)
     for m in _PROJECT_TOKEN.finditer(title):   # "llama.cpp v1.0.0" (blog) == "ggml-org/llama.cpp v1.0.0 released" (GitHub)
         out.add(f"{m.group(1).lower()}@{m.group(2)}.{m.group(3)}")
     return out
+
+
+def token_bases(tokens) -> dict[str, set[str]]:
+    """{'gemini4': {'neon'}, 'gpt6.2': set()}: each base token with the variants named (empty = generic mention)."""
+    out: dict[str, set[str]] = {}
+    for t in tokens:
+        base, _, var = t.partition("~")
+        out.setdefault(base, set())
+        if var:
+            out[base].add(var)
+    return out
+
+
+def tokens_match(a: dict[str, set[str]], b: dict[str, set[str]]) -> bool:
+    """Same story if they share a base and either side is generic or they share a variant."""
+    for base, va in a.items():
+        vb = b.get(base)
+        if vb is not None and (not va or not vb or va & vb):
+            return True
+    return False
+
+
+_TITLE_STOP = set("""a an the and or but of to in on at for from by with without about over under into onto as is are
+    was were be been being it its it's this that these those he she they we you i his her their our your my me him them
+    us s t not no yes so than then just also more most very can could will would should may might must has have had do
+    does did says say said new now how why what when where who which here there up down out off all any some one ai
+    report reports via after before amid while""".split())
+
+
+def title_sig(title: str) -> tuple[frozenset, frozenset]:
+    """(content words, words containing digits) of a headline, for spotting the same story told twice."""
+    t = (title or "").translate(_DASHES).translate(_QUOTES).lower()
+    words = {w for w in re.findall(r"[a-z0-9]+", t) if w not in _TITLE_STOP and len(w) > 1}
+    return frozenset(words), frozenset(w for w in words if any(ch.isdigit() for ch in w))
+
+
+def same_headline(a: tuple, b: tuple, same_source: bool = False) -> bool:
+    """Two headlines about the same story: same numbers (so 'llm 0.37.2' != 'llm 0.37.3'), and most words shared.
+    Within one source (a title corrected after publishing, a post re-published under a new link) it must be nearly
+    identical, or one headline must contain the other."""
+    (wa, na), (wb, nb) = a, b
+    if not wa or not wb or na != nb:
+        return False
+    shared = len(wa & wb)
+    if wa == wb:
+        return True
+    if shared < 4:
+        return False
+    jacc, contain = shared / len(wa | wb), shared / min(len(wa), len(wb))
+    if same_source:
+        return jacc >= 0.75 or (contain == 1.0 and min(len(wa), len(wb)) >= 5)
+    return jacc >= 0.5 or (shared >= 5 and contain >= 0.8)
 
 
 _RSS_FOOTERS = [
@@ -1776,10 +1918,11 @@ def _fetch_one_feed(feed: tuple[str, str, str, str]) -> tuple[int, int]:
                 "User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5"}) as cl:
             r = cl.get(url)
             r.raise_for_status()
-        entries = parse_feed(r.content)
+        entries = HTML_FEEDS[key](r.text) if key in HTML_FEEDS else parse_feed(r.content)
         cutoff = now_utc() - NEWS_MAX_AGE
-        fresh = [e for e in entries if e["title"] and e["url"] and str(e["url"]).startswith(("https://", "http://"))
-                 and (e["published"] is None or (parse_iso(e["published"]) or now_utc()) >= cutoff)]
+        entries = [e for e in entries if e["title"] and e["url"] and str(e["url"]).startswith(("https://", "http://"))]
+        entries = _date_undated(key, entries)
+        fresh = [e for e in entries if e["published"] is None or (parse_iso(e["published"]) or now_utc()) >= cutoff]
         fresh.sort(key=lambda e: e["published"] or "", reverse=True)
         fresh = fresh[:NEWS_PER_FEED]
         new = 0
@@ -1797,6 +1940,32 @@ def _fetch_one_feed(feed: tuple[str, str, str, str]) -> tuple[int, int]:
             status, msg = "error", "The feed is not valid RSS/Atom XML"
         set_news_source(key, name, url, type_, status, msg)
         return -1, 0
+
+
+def _date_undated(key: str, entries: list[dict]) -> list[dict]:
+    """Some feeds (Google Developers Blog) give no dates. The first time such a feed is read, its posts are only
+    remembered (they may be months old); after that, an undated post that was not there before is dated 'now'."""
+    undated = [e for e in entries if not e["published"]]
+    if not undated:
+        return entries
+    skey = f"feed_baseline:{key}"
+    try:
+        base = set(json.loads(get_setting(skey) or "null") or [])
+        first = get_setting(skey) is None
+    except ValueError:
+        base, first = set(), True
+    urls = {canonical_url(e["url"]) for e in undated}
+    with db() as c:
+        known = {r[0] for r in c.execute(f"SELECT url FROM news WHERE source=? AND url IN ({','.join('?' * len(undated))})",
+                                         (key, *[e["url"] for e in undated]))}
+    out = []
+    for e in entries:
+        if e["published"]:
+            out.append(e)
+        elif not first and canonical_url(e["url"]) not in base:
+            out.append(e if e["url"] in known else {**e, "published": iso()})   # stored rows keep their first date
+    set_setting(skey, json.dumps(sorted(base | urls)[-400:]))
+    return out
 
 
 def fetch_news() -> None:
@@ -2296,6 +2465,9 @@ def score_news(r: dict, coverage: list[str], story_metrics: Optional[dict] = Non
     if r["kind"] == "model":
         pen, detail = model_age_penalty(r.get("published"), own.get("model_status"))
         parts.append({"key": "age", "label": "Release age", "max": 30, "pts": pen, "penalty": True, "detail": detail})
+    if own.get("alert"):
+        parts.append({"key": "alert", "label": "Highest alert", "max": 25, "pts": 25.0,
+                      "detail": "official model release" if own["alert"] == "release" else "major AI breakthrough"})
     for p in parts:
         p["pts"] = round(p["pts"], 1)
     score = max(0.0, round(sum(p["pts"] for p in parts), 1))
@@ -2407,15 +2579,18 @@ def rescore_news() -> None:
         window = iso(now_utc() - timedelta(hours=72))      # corroboration counts within 72 hours
         token_items: dict[str, list[dict]] = {}
         tokens_of: dict[str, set[str]] = {}
+        bases_of: dict[str, dict[str, set[str]]] = {}
         for r in rows:
             toks = story_tokens(r["title"])
-            tokens_of[r["id"]] = toks
+            tokens_of[r["id"]], bases_of[r["id"]] = toks, token_bases(toks)
             if (r["published"] or r["first_seen"]) >= window:
-                for t in toks:
-                    token_items.setdefault(t, []).append(r)
-        runnable_tokens = set().union(*[tokens_of[r["id"]] for r in rows if r["kind"] in ("model", "repo")] or [set()])
+                for b in bases_of[r["id"]]:
+                    token_items.setdefault(b, []).append(r)
+        # runnable check by base: an article about "Qwen3.8" matches the model repo "Qwen3.8-Flash"
+        runnable_tokens = {b for r in rows if r["kind"] in ("model", "repo") for b in bases_of[r["id"]]}
         for r in rows:
-            related = {x["id"]: x for t in tokens_of[r["id"]] for x in token_items.get(t, [])}
+            mine = bases_of[r["id"]]
+            related = {x["id"]: x for b in mine for x in token_items.get(b, []) if tokens_match(mine, bases_of[x["id"]])}
             cov = sorted({x["source_name"] for x in related.values()})
             cov_types = list(dict.fromkeys(SOURCE_SHORT.get(x["source_type"], "Source") for x in
                                            sorted([r, *related.values()], key=lambda x: x["id"] != r["id"])))
@@ -2427,7 +2602,7 @@ def rescore_news() -> None:
             score, parts = score_news(r, cov, story_metrics, cov_types)
             r["importance"] = score
             r["_n_sources"] = len(set(cov) | {r["source_name"]})
-            flags = news_flags(r, json.loads(r["categories"] or "[]"), tokens_of[r["id"]], runnable_tokens)
+            flags = news_flags(r, json.loads(r["categories"] or "[]"), set(mine), runnable_tokens)
             c.execute("UPDATE news SET importance=?, importance_parts=?, story=?, metrics=? WHERE id=?",
                       (score, json.dumps(parts), json.dumps(sorted(tokens_of[r["id"]])), json.dumps(flags), r["id"]))
         for nid, t in trend_scores(rows).items():
@@ -2435,30 +2610,80 @@ def rescore_news() -> None:
     set_setting("news_sync_at", iso())
 
 
+STORY_DAYS = 5          # reports about one model/product within this many days form one event
+HEADLINE_DAYS = 3       # same headline (different wording) within this many days: one event
+
+
+def _link_keys(it: dict) -> list[str]:
+    """Exact keys that mean 'the same thing': the canonical link (an HN thread about an OpenAI post links that post),
+    and a new GitHub repo's name + creation time (a mirror created in the same second)."""
+    keys = []
+    url = str(it.get("url") or "")
+    if url.startswith(("https://", "http://")) and it.get("source") != "alerts":   # a docs page lists many models
+        keys.append("url:" + canonical_url(url))
+    if it.get("kind") == "repo" and it.get("id", "").startswith("ghrepo:") and it.get("published"):
+        keys.append(f"repo:{url.rstrip('/').rsplit('/', 1)[-1].lower()}@{it['published'][:19]}")
+    return keys
+
+
 def group_stories(items: list[dict]) -> list[dict]:
-    """Collapse items about the same model/product (published within 5 days of each other) into one event."""
+    """Collapse items about one event into a single card: the same model/product (story tokens, within 5 days),
+    the same link, or the same headline in other words (within 3 days). Within one source, a re-published or
+    re-titled copy of a post is hidden instead of listed as coverage (its id goes to hidden_ids)."""
     groups: list[dict] = []
-    by_token: dict[str, dict] = {}
+    by_key: dict[str, dict] = {}
+    by_base: dict[str, list[dict]] = {}
+    by_word: dict[str, list[dict]] = {}
     for it in items:
         when = parse_iso(it.get("published") or it.get("first_seen")) or now_utc()
-        g = next((by_token[t] for t in it["story"] if t in by_token and abs((by_token[t]["when"] - when).days) <= 5), None)
+        bases = token_bases(it.get("story") or [])
+        sig = title_sig(it.get("title") or "") if it.get("kind") in ("article", "discussion") else None
+        keys = _link_keys(it)
+        g = next((by_key[k] for k in keys if k in by_key), None)
+        if g is None and bases:
+            g = next((gr for b in bases for gr in by_base.get(b, [])
+                      if abs((gr["when"] - when).days) <= STORY_DAYS and tokens_match(bases, gr["bases"])), None)
+        if g is None and sig and sig[0]:
+            hits: dict[int, list] = {}
+            for w in sig[0]:
+                for gr in by_word.get(w, []):
+                    hits.setdefault(id(gr), [gr, 0])[1] += 1
+            need = min(4, len(sig[0]))   # same_headline needs 4 shared words (or identical short titles)
+            g = next((gr for gr, n in hits.values() if n >= need and abs((gr["when"] - when).days) <= HEADLINE_DAYS
+                      and any(same_headline(sig, s, src == it.get("source")) for s, src in gr["sigs"])), None)
         if g is None:
-            g = {"members": [], "when": when}
+            g = {"members": [], "when": when, "bases": {}, "sigs": []}
             groups.append(g)
         g["members"].append(it)
-        for t in it["story"]:
-            by_token.setdefault(t, g)
+        for k in keys:
+            by_key.setdefault(k, g)
+        for b, vs in bases.items():
+            if b not in g["bases"]:
+                by_base.setdefault(b, []).append(g)
+            g["bases"].setdefault(b, set()).update(vs)
+        if sig and sig[0]:
+            g["sigs"].append((sig, it.get("source")))
+            for w in sig[0]:
+                lst = by_word.setdefault(w, [])
+                if not lst or lst[-1] is not g:
+                    lst.append(g)
     # Lead with the primary source (the lab's own announcement beats coverage of it), keep the group's rank.
     authority = {"lab": 0, "hub": 1, "press": 2, "analysis": 3, "custom": 4, "community": 5}
     out = []
     for g in groups:
-        members = g["members"]
-        lead = min(members, key=lambda x: (authority.get(x["source_type"], 9), -(x.get("importance") or 0)))
+        members, hidden = _drop_reposts(g["members"])
+        lead = min(members, key=lambda x: (authority.get(x["source_type"], 9), x.get("source") == "alerts",
+                                           -(x.get("importance") or 0)))
         others = [x for x in members if x is not lead]
         lead = {**lead,
                 # every sub-report has a title and a link, otherwise it is not listed
                 "related": [{k: x.get(k) for k in ("id", "title", "url", "source_name", "source_type", "kind", "published")}
                             for x in others if (x.get("title") or "").strip() and str(x.get("url") or "").startswith(("https://", "http://"))]}
+        if hidden:
+            lead["hidden_ids"] = hidden
+        alert = next((m.get("alert") for m in ((x.get("metrics") or {}) for x in members) if isinstance(m, dict) and m.get("alert")), None)
+        if alert and not (lead.get("metrics") or {}).get("alert"):   # e.g. the lab's post leads a story the alert found
+            lead["metrics"] = {**(lead.get("metrics") or {}), "alert": alert}
         if not (lead.get("summary") or "").strip() and not lead.get("brief"):
             # e.g. DeepMind's feed sends no description: borrow the most informative summary from the merged coverage
             best = max(others, key=lambda x: len(x.get("summary") or ""), default=None)
@@ -2466,6 +2691,439 @@ def group_stories(items: list[dict]) -> list[dict]:
                 lead["summary"], lead["summary_from"] = best["summary"], best["source_name"]
         out.append(lead)
     return out
+
+
+def _drop_reposts(members: list[dict]) -> tuple[list[dict], list[str]]:
+    """Copies of one post from the same source (title corrected after publishing, so the link changed; or re-posted
+    under a second link): keep the copy seen last (the corrected one), hide the others."""
+    if len(members) < 2:
+        return members, []
+    keep: list[dict] = []
+    hidden: list[str] = []
+    for it in sorted(members, key=lambda x: x.get("first_seen") or "", reverse=True):
+        sig = title_sig(it.get("title") or "")
+        if it.get("kind") in ("article", "discussion") and any(
+                k.get("source") == it.get("source") and k.get("kind") == it.get("kind")
+                and same_headline(sig, title_sig(k.get("title") or ""), True) for k in keep):
+            hidden.append(it["id"])
+            continue
+        keep.append(it)
+    order = {id(x): i for i, x in enumerate(members)}
+    return sorted(keep, key=lambda x: order[id(x)]), hidden
+
+
+# ---------------------------------------------------------------------------
+# Highest alerts -> News. alerts.py (GitHub Actions, every 5 minutes) spots official Claude/Gemini/GPT releases,
+# often in the vendors' model lists before any blog post exists. Each alert also becomes a News event, so a new
+# model is on the News page right away; the announcement and press coverage merge into that card later.
+# ---------------------------------------------------------------------------
+SITE_URL = os.environ.get("WORKBENCH_SITE_URL", "https://mujtabaahmadi548-007.github.io/Research-workbench-AI/").strip()
+VENDOR_LABEL = {"anthropic": "Anthropic", "openai": "OpenAI", "google": "Google"}
+
+
+def ingest_alerts(alerts: list[dict]) -> int:
+    """Add alerts as News items (or flag the news item they point to). Returns how many were new."""
+    new = 0
+    cutoff = now_utc() - NEWS_KEEP
+    with db() as c:
+        for a in alerts[:50]:
+            kind, url = a.get("kind"), str(a.get("url") or "")
+            when = a.get("published") or a.get("detected")
+            if kind not in ("release", "breakthrough") or not url.startswith(("https://", "http://")) or not when:
+                continue
+            if (parse_iso(when) or now_utc()) < cutoff:
+                continue
+            from_docs = " is listed in " in (a.get("title") or "")   # a new ID in the vendor's model list
+            if not from_docs:
+                row = c.execute("SELECT id, metrics FROM news WHERE id=? OR url=?", (news_id(url), url)).fetchone()
+                if row:   # the post itself is already in the news: mark it
+                    m = json.loads(row["metrics"] or "{}")
+                    if m.get("alert") != kind:
+                        c.execute("UPDATE news SET metrics=? WHERE id=?", (json.dumps({**m, "alert": kind}), row["id"]))
+                    continue
+            vendor = VENDOR_LABEL.get(a.get("vendor") or "", "")
+            name = a.get("name") or a.get("title") or ""
+            if from_docs:
+                title = f"New {vendor + ' ' if vendor else ''}model: {name}"
+                summary = (f"{name} was added to {a.get('source') or 'the official model list'}, the official list of "
+                           f"available models (detected {fmt_utc(a.get('detected'))}). The official announcement and "
+                           "coverage are merged into this card as they appear.")
+                aid = "alert:" + re.sub(r"[^a-z0-9.\-]+", "-", (a.get("key") or name).lower()).strip("-")
+            else:
+                title = a.get("title") or name
+                summary = "; ".join(a.get("evidence") or [])
+                aid = news_id(url)
+            rec = {"id": aid, "kind": "discussion" if "news.ycombinator.com" in url else "article", "source": "alerts",
+                   "source_name": a.get("source") or "Highest alerts", "source_type": "lab", "title": title, "url": url,
+                   "summary": summary, "published": when,
+                   "categories": ["model_release"] if kind == "release" else ["research"],
+                   "metrics": {"alert": kind, "official": kind == "release"}}
+            new += upsert_news(c, rec)
+    return new
+
+
+def fmt_utc(value: Optional[str]) -> str:
+    d = parse_iso(value)
+    return f"{d:%b} {d.day}, {d:%H:%M} UTC" if d else "recently"
+
+
+def sync_site_alerts() -> None:
+    """Desktop app: alerts are found by the website's GitHub job; read them from the published alerts.json."""
+    if not SITE_URL:
+        return
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True, verify=SSL_CTX, headers={"User-Agent": USER_AGENT}) as cl:
+            r = cl.get(SITE_URL.rstrip("/") + "/alerts.json", params={"t": int(time.time())})
+            r.raise_for_status()
+            alerts = r.json().get("alerts") or []
+        n = ingest_alerts(alerts)
+        if n:
+            log.info("Alerts: %d new model release/breakthrough alert(s) added to News.", n)
+    except Exception as exc:
+        log.info("Alerts: could not read the website's alerts.json (%s).", type(exc).__name__)
+
+
+# ---------------------------------------------------------------------------
+# X (Twitter): posts from AI labs and researchers. Reading X needs a paid API key: the official X API
+# (pay per use, about $0.005 per post read) or twitterapi.io (an unofficial reseller, about $0.15 per 1,000 posts).
+# One search query per ~25 accounts ("from:a OR from:b ... -is:retweet -is:reply"); since_id / since_time make every
+# request return only posts not read before, and a daily cap bounds the cost. Without a key the desktop app reads
+# the website's x.json instead (so only one place pays).
+# ---------------------------------------------------------------------------
+X_ACCOUNTS_DEFAULT: list[tuple[str, str]] = [
+    ("AnthropicAI", "lab"), ("claudeai", "lab"), ("OpenAI", "lab"), ("OpenAIDevs", "lab"), ("GoogleDeepMind", "lab"),
+    ("GoogleAI", "lab"), ("GeminiApp", "lab"), ("googleaidevs", "lab"), ("AIatMeta", "lab"), ("MistralAI", "lab"),
+    ("xai", "lab"), ("deepseek_ai", "lab"), ("Alibaba_Qwen", "lab"), ("huggingface", "lab"),
+    ("sama", "people"), ("karpathy", "people"), ("demishassabis", "people"), ("ylecun", "people"),
+    ("OfficialLoganK", "people"), ("JeffDean", "people"), ("natolambert", "people"), ("emollick", "people"),
+]
+X_PROVIDERS = {
+    "x": {"label": "Official X API", "per_post": 0.005,
+          "base": os.environ.get("WORKBENCH_X_BASE", "https://api.x.com/2").rstrip("/")},
+    "twitterapi": {"label": "twitterapi.io (unofficial)", "per_post": 0.00015,
+                   "base": os.environ.get("WORKBENCH_TWITTERAPI_BASE", "https://api.twitterapi.io").rstrip("/")},
+}
+X_KEEP_DAYS = 7
+X_DAILY_CAP = 100          # posts read per UTC day (default); official API: $0.50/day at most
+X_MAX_PAGES = 3
+_HANDLE = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+
+
+def x_accounts() -> list[tuple[str, str]]:
+    """[(handle, group)] from Settings, else the WORKBENCH_X_ACCOUNTS variable ('handle:group, ...'), else defaults."""
+    raw = get_setting("x_accounts")
+    items: list = []
+    if raw:
+        try:
+            items = json.loads(raw)
+        except ValueError:
+            items = []
+    elif os.environ.get("WORKBENCH_X_ACCOUNTS", "").strip():
+        items = [s.strip() for s in os.environ["WORKBENCH_X_ACCOUNTS"].split(",")]
+    out, seen = [], set()
+    for s in items or [f"{h}:{g}" for h, g in X_ACCOUNTS_DEFAULT]:
+        handle, _, group = str(s).strip().lstrip("@").partition(":")
+        if _HANDLE.match(handle) and handle.lower() not in seen:
+            seen.add(handle.lower())
+            out.append((handle, group.strip().lower() if group.strip().lower() in ("lab", "people") else "people"))
+    return out[:60]
+
+
+def x_config() -> dict:
+    key = (get_setting("x_api_key") or os.environ.get("WORKBENCH_X_KEY", "")).strip()
+    provider = (get_setting("x_provider") or os.environ.get("WORKBENCH_X_PROVIDER", "") or "x").strip().lower()
+    if provider not in X_PROVIDERS:
+        provider = "x"
+    try:
+        cap = int(get_setting("x_daily_cap") or os.environ.get("WORKBENCH_X_DAILY_CAP") or X_DAILY_CAP)
+    except ValueError:
+        cap = X_DAILY_CAP
+    return {"key": key, "provider": provider, "cap": max(10, min(5000, cap)), "accounts": x_accounts()}
+
+
+def _x_queries(accounts: list[tuple[str, str]], provider: str) -> list[str]:
+    tail = " -is:retweet -is:reply" if provider == "x" else " -filter:replies -filter:retweets"
+    limit = 512 - len(tail) - 40          # room for since_time on twitterapi.io
+    out, cur = [], []
+    for handle, _ in accounts:
+        q = "(" + " OR ".join(f"from:{h}" for h in [*cur, handle]) + ")"
+        if cur and len(q) > limit:
+            out.append("(" + " OR ".join(f"from:{h}" for h in cur) + ")" + tail)
+            cur = []
+        cur.append(handle)
+    if cur:
+        out.append("(" + " OR ".join(f"from:{h}" for h in cur) + ")" + tail)
+    return out
+
+
+def _x_reads_today() -> int:
+    day, _, n = (get_setting("xstate_reads") or "").partition(":")
+    return int(n) if day == now_utc().strftime("%Y-%m-%d") and n.isdigit() else 0
+
+
+def _x_add_reads(n: int) -> None:
+    set_setting("xstate_reads", f"{now_utc():%Y-%m-%d}:{_x_reads_today() + n}")
+
+
+def _x_text_links(text: str, urls: list[dict]) -> tuple[str, list[str]]:
+    """Replace t.co short links with the real ones; drop links to the post's own media."""
+    links = []
+    for u in urls or []:
+        short, real = u.get("url") or "", u.get("expanded_url") or u.get("expandedUrl") or ""
+        if not short:
+            continue
+        if re.match(r"https?://(x|twitter)\.com/\w+/status/\d+/(photo|video)/", real):
+            text = text.replace(short, "")
+        elif real:
+            text = text.replace(short, real)
+            if not re.match(r"https?://(x|twitter)\.com/", real):
+                links.append(real)
+    return htmllib.unescape(text).strip(), links[:4]
+
+
+def _x_from_official(t: dict, users: dict, media: dict) -> Optional[dict]:
+    u = users.get(t.get("author_id")) or {}
+    handle = u.get("username")
+    if not handle or not t.get("id"):
+        return None
+    note = (t.get("note_tweet") or {})
+    text, links = _x_text_links(note.get("text") or t.get("text") or "",
+                                ((note.get("entities") or t.get("entities") or {}).get("urls")) or [])
+    pm = t.get("public_metrics") or {}
+    med = [media[k] for k in ((t.get("attachments") or {}).get("media_keys") or []) if k in media]
+    return {"id": str(t["id"]), "handle": handle, "name": u.get("name") or handle,
+            "avatar": u.get("profile_image_url"), "verified": bool(u.get("verified")), "text": text,
+            "url": f"https://x.com/{handle}/status/{t['id']}", "created_at": norm_date(t.get("created_at")) or iso(),
+            "likes": pm.get("like_count"), "reposts": pm.get("retweet_count"), "replies": pm.get("reply_count"),
+            "quotes": pm.get("quote_count"), "views": pm.get("impression_count"),
+            "media": [{"url": m.get("url") or m.get("preview_image_url"), "type": m.get("type")} for m in med
+                      if m.get("url") or m.get("preview_image_url")][:4],
+            "links": links}
+
+
+def _x_from_twitterapi(t: dict) -> Optional[dict]:
+    a = t.get("author") or {}
+    handle = a.get("userName")
+    if not handle or not t.get("id") or t.get("isReply") or t.get("retweeted_tweet") or str(t.get("text", "")).startswith("RT @"):
+        return None
+    created = None
+    try:
+        created = iso(datetime.strptime(t.get("createdAt") or "", "%a %b %d %H:%M:%S %z %Y"))
+    except ValueError:
+        created = norm_date(t.get("createdAt"))
+    text, links = _x_text_links(t.get("text") or "", (t.get("entities") or {}).get("urls") or [])
+    med = ((t.get("extendedEntities") or {}).get("media")) or []
+    return {"id": str(t["id"]), "handle": handle, "name": a.get("name") or handle, "avatar": a.get("profilePicture"),
+            "verified": bool(a.get("isBlueVerified") or a.get("isVerified")), "text": text,
+            "url": t.get("url") or f"https://x.com/{handle}/status/{t['id']}", "created_at": created or iso(),
+            "likes": t.get("likeCount"), "reposts": t.get("retweetCount"), "replies": t.get("replyCount"),
+            "quotes": t.get("quoteCount"), "views": t.get("viewCount"),
+            "media": [{"url": m.get("media_url_https"), "type": m.get("type")} for m in med if m.get("media_url_https")][:4],
+            "links": links}
+
+
+def store_x_posts(posts: list[dict], groups: dict[str, str]) -> int:
+    new = 0
+    now = iso()
+    with db() as c:
+        for p in posts:
+            grp = groups.get(p["handle"].lower(), p.get("grp") or "people")
+            row = c.execute("SELECT 1 FROM xposts WHERE id=?", (p["id"],)).fetchone()
+            if row:
+                c.execute("""UPDATE xposts SET likes=?, reposts=?, replies=?, quotes=?, views=?, avatar=COALESCE(?, avatar),
+                             name=?, grp=? WHERE id=?""",
+                          (p.get("likes"), p.get("reposts"), p.get("replies"), p.get("quotes"), p.get("views"),
+                           p.get("avatar"), p.get("name"), grp, p["id"]))
+                continue
+            c.execute("""INSERT INTO xposts (id, handle, name, avatar, verified, text, url, created_at, likes, reposts,
+                         replies, quotes, views, media, links, first_seen, grp) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                      (p["id"], p["handle"], p.get("name"), p.get("avatar"), int(bool(p.get("verified"))), p.get("text") or "",
+                       p["url"], p["created_at"], p.get("likes"), p.get("reposts"), p.get("replies"), p.get("quotes"),
+                       p.get("views"), json.dumps(p.get("media") or []), json.dumps(p.get("links") or []), now, grp))
+            new += 1
+        c.execute("DELETE FROM xposts WHERE created_at < ?", (iso(now_utc() - timedelta(days=X_KEEP_DAYS)),))
+    return new
+
+
+class XError(Exception):
+    def __init__(self, status: str, message: str):
+        super().__init__(message)
+        self.status, self.message = status, message
+
+
+def _x_http_error(r: httpx.Response, provider: str) -> XError:
+    detail = ""
+    try:
+        j = r.json()
+        detail = str(j.get("detail") or j.get("title") or j.get("message") or j.get("msg") or "")[:160]
+    except ValueError:
+        pass
+    who = X_PROVIDERS[provider]["label"]
+    if r.status_code in (401, 403):
+        return XError("error", f"{who} refused the key (HTTP {r.status_code}){': ' + detail if detail else ''}. "
+                               "Check the key, and for the official API that the app's project has credits.")
+    if r.status_code == 402:
+        return XError("error", f"{who}: no credits left (HTTP 402). Add credits in the developer console.")
+    if r.status_code == 429:
+        return XError("rate_limited", f"{who} rate limit reached (HTTP 429); trying again on the next refresh.")
+    return XError("error", f"{who} answered HTTP {r.status_code}{': ' + detail if detail else ''}")
+
+
+def _x_fetch_official(cl: httpx.Client, cfg: dict, query: str, since: Optional[str], left: int) -> tuple[list[dict], Optional[str], int]:
+    base = X_PROVIDERS["x"]["base"]
+    params = {"query": query, "max_results": max(10, min(100, left)),
+              "tweet.fields": "created_at,public_metrics,entities,attachments,note_tweet,author_id",
+              "expansions": "author_id,attachments.media_keys", "user.fields": "name,username,profile_image_url,verified",
+              "media.fields": "url,preview_image_url,type"}
+    if since:
+        params["since_id"] = since
+    else:   # first run: only the last 24 hours, so the first read stays small
+        params["start_time"] = iso(now_utc() - timedelta(hours=24))
+    posts, newest, token = [], since, None
+    for _ in range(X_MAX_PAGES):
+        if token:
+            params["next_token"] = token
+        r = cl.get(base + "/tweets/search/recent", params=params, headers={"Authorization": f"Bearer {cfg['key']}"})
+        if r.status_code != 200:
+            raise _x_http_error(r, "x")
+        j = r.json()
+        inc = j.get("includes") or {}
+        users = {u.get("id"): u for u in inc.get("users") or []}
+        media = {m.get("media_key"): m for m in inc.get("media") or []}
+        page = [p for p in (_x_from_official(t, users, media) for t in j.get("data") or []) if p]
+        posts += page
+        meta = j.get("meta") or {}
+        if meta.get("newest_id") and (newest is None or int(meta["newest_id"]) > int(newest)):
+            newest = meta["newest_id"]
+        token = meta.get("next_token")
+        if not token or len(posts) >= left:
+            break
+    return posts, newest, len(posts)
+
+
+def _x_fetch_twitterapi(cl: httpx.Client, cfg: dict, query: str, since: Optional[str], left: int) -> tuple[list[dict], Optional[str], int]:
+    base = X_PROVIDERS["twitterapi"]["base"]
+    since_t = int(since) if since and since.isdigit() else int((now_utc() - timedelta(hours=24)).timestamp())
+    params = {"query": f"{query} since_time:{since_t}", "queryType": "Latest", "cursor": ""}
+    posts, newest, billed = [], since_t, 0
+    for _ in range(X_MAX_PAGES):
+        r = cl.get(base + "/twitter/tweet/advanced_search", params=params, headers={"X-API-Key": cfg["key"]})
+        if r.status_code != 200:
+            raise _x_http_error(r, "twitterapi")
+        j = r.json()
+        if str(j.get("status", "success")).lower() == "error":
+            raise XError("error", f"twitterapi.io: {str(j.get('msg') or j.get('message') or 'error')[:160]}")
+        raw = j.get("tweets") or []
+        billed += max(1, len(raw))   # billed per returned post (replies we skip too), minimum one per request
+        page = [p for p in (_x_from_twitterapi(t) for t in raw) if p]
+        posts += page
+        for p in page:
+            ts = parse_iso(p["created_at"])
+            if ts:
+                newest = max(newest, int(ts.timestamp()) + 1)
+        if not j.get("has_next_page") or not j.get("next_cursor") or billed >= left:
+            break
+        params["cursor"] = j["next_cursor"]
+    return posts, str(newest), billed
+
+
+def fetch_x() -> None:
+    cfg = x_config()
+    if not cfg["key"]:
+        if SITE_URL:
+            sync_site_x()
+        else:
+            set_source("x", "never", "No X API key yet: see the X page for how to add one.")
+        return
+    used, cap = _x_reads_today(), cfg["cap"]
+    if used >= cap:
+        set_source("x", "rate_limited", f"Daily limit reached ({used}/{cap} posts read today); resumes at 00:00 UTC.")
+        return
+    provider = cfg["provider"]
+    groups = {h.lower(): g for h, g in cfg["accounts"]}
+    fetcher = _x_fetch_official if provider == "x" else _x_fetch_twitterapi
+    set_source("x", "running", f"Reading {len(cfg['accounts'])} accounts on X...")
+    total = new = 0
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT, verify=SSL_CTX, headers={"User-Agent": USER_AGENT}) as cl:
+            for q in _x_queries(cfg["accounts"], provider):
+                left = cap - used - total
+                if left <= 0:
+                    break
+                skey = f"xstate_since_{provider}_{hashlib.sha1(q.encode()).hexdigest()[:10]}"
+                posts, newest, billed = fetcher(cl, cfg, q, get_setting(skey), left)
+                total += billed
+                _x_add_reads(billed)
+                new += store_x_posts(posts, groups)
+                if newest:
+                    set_setting(skey, str(newest))
+        set_setting("xstate_last", iso())
+        with db() as c:
+            n = c.execute("SELECT COUNT(*) FROM xposts").fetchone()[0]
+        msg = f"{new} new post{_s(new)} · {_x_reads_today()}/{cap} read today · {X_PROVIDERS[provider]['label']}"
+        set_source("x", "ok", msg, n, success=True)
+        log.info("X: %s.", msg)
+    except XError as exc:
+        set_source("x", exc.status, exc.message)
+        log.warning("X: %s", exc.message)
+    except Exception as exc:
+        status, msg = describe_http_error(exc)
+        set_source("x", status, f"X: {msg}")
+        log.warning("X: %s", msg)
+
+
+def sync_site_x() -> None:
+    """Desktop app without its own X key: copy the posts the website already read (x.json)."""
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True, verify=SSL_CTX, headers={"User-Agent": USER_AGENT}) as cl:
+            r = cl.get(SITE_URL.rstrip("/") + "/x.json", params={"t": int(time.time())})
+        if r.status_code == 404:
+            set_source("x", "never", "No X API key yet: see the X page for how to add one.")
+            return
+        r.raise_for_status()
+        j = r.json()
+        if not j.get("configured"):
+            set_source("x", "never", "No X API key yet (here or on the website): see the X page.")
+            return
+        posts = [p for p in j.get("items") or [] if isinstance(p, dict) and p.get("id") and p.get("handle") and p.get("url")]
+        new = store_x_posts(posts, {h.lower(): g for h, g in x_accounts()} | {p["handle"].lower(): p.get("grp") or "people" for p in posts})
+        with db() as c:
+            n = c.execute("SELECT COUNT(*) FROM xposts").fetchone()[0]
+        set_source("x", "ok", f"{new} new post{_s(new)} from your website's X feed (it holds the key)", n, success=True)
+    except Exception as exc:
+        status, msg = describe_http_error(exc)
+        set_source("x", status, f"Could not read the website's X feed: {msg}")
+
+
+def x_items(q: str = "", group: str = "all", sort: str = "latest", limit: int = 300, offset: int = 0) -> tuple[list[dict], int]:
+    where, params = [], []
+    if group in ("lab", "people"):
+        where.append("grp = ?")
+        params.append(group)
+    for tok in re.findall(r"[\w@#.+-]+", q.lower())[:8]:
+        where.append("(lower(text) LIKE ? OR lower(handle) LIKE ? OR lower(name) LIKE ?)")
+        params += [f"%{tok.lstrip('@')}%"] * 3
+    order = "COALESCE(likes, 0) DESC, created_at DESC" if sort == "top" else "created_at DESC"
+    w = ("WHERE " + " AND ".join(where)) if where else ""
+    with db() as c:
+        total = c.execute(f"SELECT COUNT(*) FROM xposts {w}", params).fetchone()[0]
+        rows = c.execute(f"SELECT * FROM xposts {w} ORDER BY {order} LIMIT ? OFFSET ?", [*params, limit, offset]).fetchall()
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["media"], d["links"], d["verified"] = json.loads(d["media"] or "[]"), json.loads(d["links"] or "[]"), bool(d["verified"])
+        out.append(d)
+    return out, total
+
+
+def x_info() -> dict:
+    cfg = x_config()
+    p = X_PROVIDERS[cfg["provider"]]
+    return {"configured": bool(cfg["key"]), "provider": cfg["provider"], "provider_label": p["label"],
+            "per_post": p["per_post"], "cap": cfg["cap"], "reads_today": _x_reads_today(),
+            "max_month_usd": round(cfg["cap"] * 30 * p["per_post"], 2),
+            "accounts": [{"handle": h, "group": g} for h, g in cfg["accounts"]],
+            "providers": {k: {"label": v["label"], "per_post": v["per_post"]} for k, v in X_PROVIDERS.items()}}
 
 
 _refresh_lock = threading.Lock()
@@ -2482,6 +3140,8 @@ def start_refresh(trigger: str, sources: Optional[list[str]] = None, force: bool
         try:
             if "news" in wanted:
                 fetch_news()
+                if trigger != "site":
+                    sync_site_alerts()   # new-model alerts found by the website's 5-minute check
             if "models" in wanted:
                 fetch_hf_models()
             if "hn" in wanted:
@@ -2507,6 +3167,8 @@ def start_refresh(trigger: str, sources: Optional[list[str]] = None, force: bool
                 # auto-refreshes (every 10 min) leave the free Gemini quota alone; the website build writes its own brief
                 if trigger not in ("auto", "site"):
                     start_brief_regen()  # rewrite Today's Frontier Brief in the background for the new items
+            if "x" in wanted:
+                fetch_x()
         except Exception:
             log.exception("Refresh hit an unexpected error (the app keeps running).")
         finally:
@@ -2531,7 +3193,7 @@ def auto_refresh_loop() -> None:
     while not _stop.wait(AUTO_REFRESH_MINUTES * 60):
         n += 1
         full = n % full_every == 0
-        if start_refresh("auto", None if full else list(NEWS_SOURCES)):
+        if start_refresh("auto", None if full else [*NEWS_SOURCES, "x"]):
             log.info("Auto-refresh: fetching %s (every %d min).", "all sources" if full else "news, models and Hacker News", AUTO_REFRESH_MINUTES)
 
 
@@ -4219,7 +4881,7 @@ def status():
 
 
 class RefreshIn(BaseModel):
-    sources: Optional[list[Literal["huggingface", "arxiv", "github", "news", "models", "hn"]]] = None
+    sources: Optional[list[Literal["huggingface", "arxiv", "github", "news", "models", "hn", "x"]]] = None
 
 
 @app.post("/api/refresh")
@@ -4322,6 +4984,16 @@ def list_news(q: str = "", category: str = "all", kind: str = "all", sort: str =
             "shown_events": len(groups[:offset + limit]), "total_items": total_items, "fresh": fresh_on,
             "unread": unread, "new_since_visit": new_since, "last_visit": prev,
             "category_counts": counts, "categories": NEWS_CATEGORIES}
+
+
+@app.get("/api/x")
+def list_x(q: str = "", group: str = "all", sort: str = "latest", limit: int = 60, offset: int = 0):
+    limit, offset = max(1, min(limit, 200)), max(0, offset)
+    items, total = x_items(q, group, sort, limit, offset)
+    with db() as c:
+        src = c.execute("SELECT * FROM sources WHERE name='x'").fetchone()
+    return {"items": items, "total": total, "more": offset + len(items) < total, **x_info(),
+            "source": dict(src) if src else None, "site_url": SITE_URL}
 
 
 @app.post("/api/news/visit")
@@ -4894,6 +5566,8 @@ def get_settings():
         "gemini_fallback": get_setting("gemini_fallback") != "0",
         "custom_feeds": json.loads(get_setting("custom_feeds") or "[]"),
         "db_path": str(DB_PATH),
+        "x": {**x_info(), "key_hint": _key_hint(get_setting("x_api_key")),
+              "accounts_text": "\n".join(f"{h} {g}" for h, g in x_accounts())},
     }
 
 
@@ -4908,9 +5582,14 @@ class SettingsIn(BaseModel):
     fetch_figures: Optional[bool] = None
     gemini_fallback: Optional[bool] = None
     custom_feeds: Optional[list[str]] = None
+    x_api_key: Optional[str] = None
+    clear_x_key: bool = False
+    x_provider: Optional[Literal["x", "twitterapi"]] = None
+    x_accounts: Optional[list[str]] = Field(default=None, max_length=60)
+    x_daily_cap: Optional[int] = Field(default=None, ge=10, le=5000)
 
 
-_KEY_PREFIX_RE = re.compile(r"^(?:export\s+|set\s+|\$env:)?[A-Za-z_]*KEY\s*[:=]\s*", re.IGNORECASE)
+_KEY_PREFIX_RE = re.compile(r"^(?:export\s+|set\s+|\$env:)?[A-Za-z_]*(?:KEY|TOKEN)\s*[:=]\s*", re.IGNORECASE)
 _INVISIBLE_CHARS = dict.fromkeys(map(ord, "​‌‍⁠﻿­"), None)
 
 
@@ -4933,6 +5612,25 @@ def clean_api_key(raw: Optional[str]) -> str:
     if len(k) > 400:
         raise ValueError("That is too long to be an API key. Copy just the key itself.")
     return k
+
+
+def clean_x_key(raw: str) -> str:
+    """X bearer token or twitterapi.io key: same tidying as Gemini keys, plus a pasted 'Bearer ' prefix."""
+    k = re.sub(r"^\s*(?:authorization\s*:\s*)?bearer\s+", "", raw or "", flags=re.I)
+    k = (k or "").translate(_INVISIBLE_CHARS).strip()
+    k = _KEY_PREFIX_RE.sub("", k).strip().strip("'\"`“”‘’").strip()
+    if not k:
+        raise ValueError("Paste a key first.")
+    if any(ch.isspace() for ch in k) or any(not 0x21 <= ord(ch) <= 0x7E for ch in k):
+        raise ValueError("The pasted text has a space or an unusual character in it. Copy just the key itself.")
+    if not 16 <= len(k) <= 400:
+        raise ValueError(f"That is {len(k)} characters long, which does not look like an API key.")
+    return k
+
+
+def _settings_like(pattern: str) -> list:
+    with db() as c:
+        return c.execute("SELECT key FROM settings WHERE key LIKE ?", (pattern,)).fetchall()
 
 
 @app.post("/api/settings")
@@ -4975,6 +5673,34 @@ def save_settings(body: SettingsIn):
         if len(feeds) > 20:
             raise HTTPException(400, "At most 20 custom feeds.")
         set_setting("custom_feeds", json.dumps(feeds))
+    if body.clear_x_key:
+        set_setting("x_api_key", None)
+        log.info("Settings: X API key removed.")
+    elif body.x_api_key is not None and body.x_api_key.strip():
+        try:
+            xkey = clean_x_key(body.x_api_key)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        set_setting("x_api_key", xkey)
+        log.info("Settings: X API key saved (ending %s).", xkey[-4:])
+    if body.x_provider is not None and body.x_provider != x_config()["provider"]:
+        set_setting("x_provider", body.x_provider)
+        for k in [r[0] for r in _settings_like("xstate_since_%")]:
+            set_setting(k, None)   # the other provider counts posts differently: start fresh
+    if body.x_accounts is not None:
+        accts = []
+        for line in body.x_accounts:
+            parts = line.replace(",", " ").replace(":", " ").split()
+            if not parts:
+                continue
+            handle = parts[0].lstrip("@")
+            if not _HANDLE.match(handle):
+                raise HTTPException(400, f"Not an X handle: {parts[0][:40]} (letters, digits and _ only, up to 15)")
+            grp = parts[1].lower() if len(parts) > 1 and parts[1].lower() in ("lab", "people") else "people"
+            accts.append(f"{handle}:{grp}")
+        set_setting("x_accounts", json.dumps(accts) if accts else None)
+    if body.x_daily_cap is not None:
+        set_setting("x_daily_cap", str(body.x_daily_cap))
     if body.fetch_on_startup is not None:
         set_setting("fetch_on_startup", "1" if body.fetch_on_startup else "0")
     for k in ("arxiv_max_results", "hf_limit", "new_per_day"):

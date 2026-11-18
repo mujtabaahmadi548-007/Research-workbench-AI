@@ -51,7 +51,9 @@ breakthrough** happened, and notifies you (`alerts.py`, `.github/workflows/alert
   gold medal…), or an official lab post with that wording that Hacker News also picked up. With the `GEMINI_API_KEY`
   secret, Gemini double-checks that it is really major.
 - **How you are notified:** a GitHub issue that @mentions you. Turn on notifications in the **GitHub mobile app** to
-  get a push on your phone (you also get an email). The alert also appears at the top of the website's News page.
+  get a push on your phone (you also get an email). The alert also appears at the top of the website's News page,
+  and as its own 🚨 story in the News list (the official announcement and press coverage merge into it later). The
+  desktop app reads the alerts from the website's `alerts.json`, so it shows them too.
 - **Louder push (optional):** install the free **ntfy** app (Android/iOS, or ntfy.sh in a browser), subscribe to a
   long random topic name only you know, and save that same name as the repository secret `NTFY_TOPIC`
   (**Settings → Secrets and variables → Actions**). Alerts then arrive as urgent push notifications.
@@ -59,6 +61,25 @@ breakthrough** happened, and notifies you (`alerts.py`, `.github/workflows/alert
 - GitHub sometimes starts scheduled runs a few minutes late, so an alert usually arrives within 5–15 minutes of the
   announcement. GitHub pauses scheduled workflows in repositories with no commits for 60 days (it emails you first);
   click **Enable workflow** on the Actions tab if that happens.
+
+### X (Twitter) page
+
+The **X (Twitter)** tab shows posts from AI labs and researchers (Anthropic, OpenAI, Google DeepMind, Gemini, Meta,
+Mistral, xAI, DeepSeek, Qwen, Hugging Face, Karpathy, Sam Altman, Demis Hassabis and others; replies and reposts
+left out). X has no free way to read posts, so it needs one paid, pay-per-use key:
+
+| Service | Price | Get the key |
+|---|---|---|
+| Official X API | $0.005 per post read | [developer.x.com](https://developer.x.com): create an app, buy credits, set a spending limit, copy the **Bearer Token** |
+| twitterapi.io (unofficial) | about $0.15 per 1,000 posts | [twitterapi.io](https://twitterapi.io): sign up (new accounts get $1 free), copy the API key |
+
+- **Website:** add the repository secret `X_API_KEY` (**Settings → Secrets and variables → Actions**). For
+  twitterapi.io also add the repository *variable* `X_API_PROVIDER` = `twitterapi`. Optional variables:
+  `X_DAILY_CAP` (posts read per day, default 100: at most about $15/month with the official API, $0.45 with
+  twitterapi.io) and `X_ACCOUNTS` (`AnthropicAI:lab, karpathy:people, ...`).
+- **Desktop app:** without a key of its own it shows the website's posts (from `x.json`) for free. To read X
+  directly, add a key in **Settings → X (Twitter)**.
+- Only new posts are read each time (since the last one seen), so the real cost is usually well below the cap.
 
 ---
 
@@ -230,9 +251,12 @@ from arXiv the first time the app is online.
 - **arXiv** is called at most once every 3 seconds (its API) and once every 15 seconds (its web pages, for
   figures). **GitHub** without a token allows 60 requests per hour, so releases are re-checked at most
   every 30 minutes.
-- **News feeds** that fail show their own error on the News page under "Feeds (show all)". Some labs
-  (for example Anthropic, Meta AI and Mistral) do not publish an RSS feed, so they are only covered
-  through press, newsletters and Hacker News.
+- **News feeds** (33: lab blogs incl. Anthropic, Mistral, Google Developers and Apple ML; AI press; expert
+  newsletters) that fail show their own error on the News page under "Feeds (show all)". Anthropic has no RSS
+  feed, so its news page is read directly. Meta AI and xAI have no usable feed; they are covered through press,
+  newsletters, Hacker News and the X page.
+- **Duplicates:** reports of one event are merged into one card (same model, same link, or the same headline in
+  other words). A post that a site re-published under a new link, or whose title was corrected, is shown once.
 
 ---
 
