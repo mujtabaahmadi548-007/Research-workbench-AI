@@ -357,6 +357,14 @@ CREATE TABLE IF NOT EXISTS xposts (
     grp        TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_xposts_created ON xposts(created_at);
+CREATE TABLE IF NOT EXISTS xlinks (            -- X post links seen in newsletters, news, HN and Bluesky (to check)
+    id         TEXT PRIMARY KEY,               -- the post id
+    handle     TEXT NOT NULL,
+    via        TEXT NOT NULL,                  -- hn | bsky | news:<source name>
+    created_at TEXT NOT NULL,                  -- from the post id
+    checked    TEXT,
+    ok         INTEGER
+);
 """
 
 SOURCE_NAMES = {
@@ -1979,6 +1987,7 @@ def _fetch_one_feed(feed: tuple[str, str, str, str]) -> tuple[int, int]:
         with db() as c:
             c.execute("UPDATE news_sources SET etag=?, last_modified=? WHERE key=?",
                       (r.headers.get("etag"), r.headers.get("last-modified"), key))
+        note_x_links(r.text, "news:" + name)   # AI newsletters link the X posts they discuss (free X source)
         entries = HTML_FEEDS[key](r.text) if key in HTML_FEEDS else parse_feed(r.content)
         cutoff = now_utc() - NEWS_MAX_AGE
         entries = [e for e in entries if e["title"] and e["url"] and str(e["url"]).startswith(("https://", "http://"))]
@@ -2990,7 +2999,8 @@ def store_x_posts(posts: list[dict], groups: dict[str, str]) -> int:
     now = iso()
     with db() as c:
         for p in posts:
-            grp = groups.get(p["handle"].lower(), p.get("grp") or "people")
+            # X posts from accounts not on the list came in through a link (newsletter, HN, Bluesky)
+            grp = groups.get(p["handle"].lower(), p.get("grp") or ("linked" if (p.get("network") or "x") == "x" else "people"))
             row = c.execute("SELECT 1 FROM xposts WHERE id=?", (p["id"],)).fetchone()
             if row:
                 c.execute("""UPDATE xposts SET likes=?, reposts=?, replies=?, quotes=?, views=?, avatar=COALESCE(?, avatar),
@@ -3092,24 +3102,30 @@ def _x_fetch_twitterapi(cl: httpx.Client, cfg: dict, query: str, since: Optional
 
 
 def fetch_x() -> None:
-    """X posts from up to three places, each optional: the paid X API (if a key is set), X posts that the news,
-    Hacker News and Bluesky link to (free), and Gemini + Google Search (needs a billing-enabled Gemini key).
-    Posts from the last two are checked against X itself (oEmbed) and stored only if they really exist."""
+    """X posts, free by default:
+    1. X's public embed timelines of the listed accounts (the same data an embedded timeline on any web page shows),
+       a few accounts per run within X's rate limit;
+    2. X posts linked in the AI newsletters, news, Hacker News and Bluesky, each checked on X (oEmbed) for its text.
+    Optional extras: the paid X API (if a key is set) and Gemini + Google Search (only with WORKBENCH_GX_ENABLE=1,
+    because Google Search in Gemini needs a billing-enabled key). The desktop app copies the website's X posts
+    instead of doing the X work twice."""
     cfg = x_config()
     parts: list[str] = []
     status = "ok"
     if cfg["key"]:
         status, msg = _fetch_x_api(cfg)
         parts.append(msg)
-    elif SITE_URL:   # desktop app: the website does the X work (one place pays / uses the Gemini quota)
+    if SITE_URL:   # desktop app: the website does the free X work; copy its posts
         parts.append(sync_site_x())
-    try:
-        with httpx.Client(timeout=HTTP_TIMEOUT, verify=SSL_CTX, headers={"User-Agent": BROWSER_UA}) as cl:
-            parts.append(fetch_x_linked(cl))
-            if not SITE_URL:
-                parts.append(fetch_x_gemini(cl))
-    except Exception as exc:
-        parts.append(f"checking posts on X failed ({describe_http_error(exc)[1]})")
+    else:
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT, verify=SSL_CTX, headers={"User-Agent": BROWSER_UA}) as cl:
+                parts.append(fetch_x_timelines(cl))
+                parts.append(fetch_x_linked(cl))
+                if GX_ENABLED:
+                    parts.append(fetch_x_gemini(cl))
+        except Exception as exc:
+            parts.append(f"checking posts on X failed ({describe_http_error(exc)[1]})")
     with db() as c:
         n = c.execute("SELECT COUNT(*) FROM xposts WHERE network='x'").fetchone()[0]
     set_source("x", status, " · ".join(p for p in parts if p), n, success=status == "ok")
@@ -3159,7 +3175,7 @@ def sync_site_x() -> str:
         r.raise_for_status()
         posts = [p for p in r.json().get("items") or [] if isinstance(p, dict) and p.get("id") and p.get("handle")
                  and p.get("url") and (p.get("network") or "x") == "x"]
-        new = store_x_posts(posts, {h.lower(): g for h, g in x_accounts()} | {p["handle"].lower(): p.get("grp") or "people" for p in posts})
+        new = store_x_posts(posts, {h.lower(): g for h, g in x_accounts()} | {p["handle"].lower(): p.get("grp") or "linked" for p in posts})
         return f"{new} new from your website" if new else ""
     except Exception as exc:
         return f"could not read the website's X posts ({describe_http_error(exc)[1]})"
@@ -3174,6 +3190,7 @@ TWITTER_EPOCH_MS = 1288834974657
 X_OEMBED = os.environ.get("WORKBENCH_X_OEMBED", "https://publish.twitter.com/oembed")
 GX_EVERY_HOURS = float(os.environ.get("WORKBENCH_GX_EVERY_HOURS", "3"))   # Gemini search for X posts, at most this often
 GX_FALLBACK_MODEL = "gemini-flash-lite-latest"
+GX_ENABLED = os.environ.get("WORKBENCH_GX_ENABLE", "") == "1"   # off by default: Google Search in Gemini is paid-only
 GX_RESET = "2026-11-19-billing-on"   # changing this makes the next run try Gemini search right away
 
 
@@ -3212,50 +3229,159 @@ def x_oembed(cl: httpx.Client, handle: str, sid: str, via: str) -> Optional[dict
 
 
 def _verify_x_candidates(cl: httpx.Client, cands: dict[str, tuple[str, str]], limit: int = 25) -> list[dict]:
-    """cands: post id -> (handle, via). Skips posts already stored, known-missing ones and posts older than 7 days."""
-    try:
-        bad = set(json.loads(get_setting("xstate_oembed_bad") or "[]"))
-    except ValueError:
-        bad = set()
-    week = now_utc() - timedelta(days=X_KEEP_DAYS)
-    with db() as c:
-        have = {r[0] for r in c.execute(f"SELECT id FROM xposts WHERE id IN ({','.join('?' * len(cands))})", list(cands))} if cands else set()
-    out, checked = [], 0
+    """cands: post id -> (handle, via). Queues them, then checks the newest unchecked ones on X (see check_x_links)."""
     for sid, (handle, via) in cands.items():
-        if sid in have or sid in bad or (snowflake_time(sid) or week) < week:
-            continue
-        if checked >= limit:
-            break
-        checked += 1
-        p = x_oembed(cl, handle, sid, via)
-        if p is None:
-            bad.add(sid)
-        else:
+        _queue_x_link(sid, handle, via)
+    return check_x_links(cl, limit)
+
+
+def _queue_x_link(sid: str, handle: str, via: str) -> None:
+    when = snowflake_time(sid)
+    if when and when >= now_utc() - timedelta(days=X_KEEP_DAYS):
+        with db() as c:
+            c.execute("INSERT OR IGNORE INTO xlinks (id, handle, via, created_at) VALUES (?, ?, ?, ?)", (sid, handle, via, iso(when)))
+
+
+def note_x_links(text: str, via: str) -> int:
+    """Remember the X post links (from the last 7 days) in a feed's full text, to be checked on X later."""
+    n = 0
+    for m in X_STATUS.finditer(text or ""):
+        if m.group(1).lower() not in ("i", "intent", "share", "home", "search"):
+            _queue_x_link(m.group(2), m.group(1), via)
+            n += 1
+    return n
+
+
+def check_x_links(cl: httpx.Client, limit: int = 40) -> list[dict]:
+    """Check queued links on X, newest first and the listed accounts first; keep the real posts."""
+    week = iso(now_utc() - timedelta(days=X_KEEP_DAYS))
+    listed = [h.lower() for h, _ in x_accounts()]
+    with db() as c:
+        c.execute("DELETE FROM xlinks WHERE created_at < ?", (week,))
+        c.execute("UPDATE xlinks SET checked=?, ok=1 WHERE checked IS NULL AND id IN (SELECT id FROM xposts)", (iso(),))
+        rows = c.execute(f"""SELECT id, handle, via FROM xlinks WHERE checked IS NULL
+                             ORDER BY lower(handle) IN ({','.join('?' * len(listed)) or "''"}) DESC, created_at DESC LIMIT ?""",
+                         (*listed, limit)).fetchall()
+    out = []
+    for sid, handle, via in rows:
+        try:
+            p = x_oembed(cl, handle, sid, via)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 429:   # X asks us to slow down: the rest waits for the next run
+                break
+            p = None
+        with db() as c:
+            c.execute("UPDATE xlinks SET checked=?, ok=? WHERE id=?", (iso(), int(p is not None), sid))
+        if p:
             out.append(p)
-    set_setting("xstate_oembed_bad", json.dumps(sorted(bad)[-1000:]))
     return out
 
 
 def fetch_x_linked(cl: httpx.Client) -> str:
-    """X posts that Hacker News stories, news items and Bluesky posts link to (free; AI stories only)."""
+    """X posts linked in the AI newsletters/news (queued while reading the feeds), in Hacker News stories and in
+    Bluesky posts (free; checked on X, so each one is real and shown with its own text)."""
     week = iso(now_utc() - timedelta(days=X_KEEP_DAYS))
-    cands: dict[str, tuple[str, str]] = {}
     with db() as c:
-        for url, source in c.execute("SELECT url, source FROM news WHERE COALESCE(published, first_seen) >= ? AND "
-                                     "(url LIKE '%x.com/%/status%' OR url LIKE '%twitter.com/%/status%')", (week,)):
-            m = X_STATUS.search(url or "")
+        news_links = c.execute("SELECT url, source FROM news WHERE COALESCE(published, first_seen) >= ? AND "
+                               "(url LIKE '%x.com/%/status%' OR url LIKE '%twitter.com/%/status%')", (week,)).fetchall()
+        bsky_links = c.execute("SELECT links FROM xposts WHERE network='bsky' AND created_at >= ?", (week,)).fetchall()
+    for url, source in news_links:
+        m = X_STATUS.search(url or "")
+        if m:
+            _queue_x_link(m.group(2), m.group(1), "hn" if source == "hn" else "news")
+    for (links,) in bsky_links:
+        for u in json.loads(links or "[]"):
+            m = X_STATUS.search(u or "")
             if m:
-                cands.setdefault(m.group(2), (m.group(1), "hn" if source == "hn" else "news"))
-        for (links,) in c.execute("SELECT links FROM xposts WHERE network='bsky' AND created_at >= ?", (week,)):
-            for u in json.loads(links or "[]"):
-                m = X_STATUS.search(u or "")
-                if m:
-                    cands.setdefault(m.group(2), (m.group(1), "bsky"))
-    if not cands:
+                _queue_x_link(m.group(2), m.group(1), "bsky")
+    posts = check_x_links(cl, X_LINK_CHECKS)
+    new = store_x_posts(posts, x_groups())
+    with db() as c:
+        waiting = c.execute("SELECT COUNT(*) FROM xlinks WHERE checked IS NULL").fetchone()[0]
+    return (f"{new} linked post{_s(new)} added" if new else "") + (f" ({waiting} more to check)" if waiting else "")
+
+
+def x_groups() -> dict[str, str]:
+    """Group per X handle: the listed accounts are 'lab' or 'people'; anyone else came in through a link."""
+    return {h.lower(): g for h, g in x_accounts()}
+
+
+# --- X's embed timelines --------------------------------------------------------------------------------------------
+# syndication.twitter.com/srv/timeline-profile serves what an embedded X timeline on a web page shows: an account's
+# recent posts with text, likes and images. It allows ~30 requests per window, so each run reads a few accounts in
+# turn (the X-Rate-Limit headers are respected). Some people's embed timelines are months old; the 7-day limit drops those.
+X_TIMELINE = os.environ.get("WORKBENCH_X_TIMELINE", "https://syndication.twitter.com/srv/timeline-profile/screen-name/")
+X_TIMELINES_PER_RUN = int(os.environ.get("WORKBENCH_X_TIMELINES_PER_RUN", "3"))
+X_LINK_CHECKS = int(os.environ.get("WORKBENCH_X_LINK_CHECKS", "40"))
+_NEXT_DATA = re.compile(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', re.S)
+
+
+def _x_from_timeline(t: dict, handle: str) -> Optional[dict]:
+    u = t.get("user") or {}
+    sn = u.get("screen_name") or ""
+    sid = str(t.get("id_str") or "")
+    if sn.lower() != handle.lower() or not sid.isdigit() or t.get("retweeted_status"):
+        return None
+    reply_to = (t.get("in_reply_to_screen_name") or "").lower()
+    if reply_to and reply_to != sn.lower():   # replies to others are left out (own threads stay)
+        return None
+    ents = t.get("entities") or {}
+    text, links = _x_text_links(t.get("full_text") or t.get("text") or "", ents.get("urls") or [])
+    media = ((t.get("extended_entities") or {}).get("media")) or ents.get("media") or []
+    for m in media:   # the text ends with a t.co link to its own picture
+        if m.get("url"):
+            text = text.replace(m["url"], "").strip()
+    when = snowflake_time(sid)
+    if not when or not (text or media):
+        return None
+    return {"id": sid, "network": "x", "via": "timeline", "handle": sn, "name": u.get("name") or sn,
+            "avatar": u.get("profile_image_url_https"), "verified": bool(u.get("verified") or u.get("is_blue_verified")),
+            "text": text, "url": f"https://x.com/{sn}/status/{sid}", "created_at": iso(when),
+            "likes": t.get("favorite_count"), "reposts": t.get("retweet_count"), "replies": t.get("reply_count"),
+            "quotes": t.get("quote_count"), "views": None,
+            "media": [{"url": m.get("media_url_https"), "type": m.get("type")} for m in media if m.get("media_url_https")][:4],
+            "links": links}
+
+
+def fetch_x_timelines(cl: httpx.Client) -> str:
+    accounts = x_accounts()
+    if not accounts:
         return ""
-    posts = _verify_x_candidates(cl, cands)
-    new = store_x_posts(posts, {h.lower(): g for h, g in x_accounts()})
-    return f"{new} linked post{_s(new)} added" if new else ""
+    now = now_utc()
+    pause = parse_iso(get_setting("xstate_tl_pause"))
+    if pause and pause > now:
+        return f"X timelines: X asked to slow down; next read after {pause:%H:%M} UTC"
+    i = int(get_setting("xstate_tl_idx") or 0) % len(accounts)
+    week = now - timedelta(days=X_KEEP_DAYS)
+    groups = x_groups()
+    read, new, notes = 0, 0, []
+    for _ in range(min(X_TIMELINES_PER_RUN, len(accounts))):
+        handle, _grp = accounts[i]
+        r = cl.get(X_TIMELINE + handle, follow_redirects=True)
+        left = r.headers.get("x-rate-limit-remaining")
+        reset = r.headers.get("x-rate-limit-reset")
+        if r.status_code == 429:
+            until = datetime.fromtimestamp(int(reset), tz=timezone.utc) if reset and reset.isdigit() else now + timedelta(minutes=15)
+            set_setting("xstate_tl_pause", iso(min(until, now + timedelta(hours=1))))
+            notes.append(f"X asked to slow down (next read after {min(until, now + timedelta(hours=1)):%H:%M} UTC)")
+            break
+        i = (i + 1) % len(accounts)
+        m = _NEXT_DATA.search(r.text) if r.status_code == 200 else None
+        if not m:
+            notes.append(f"@{handle}: HTTP {r.status_code}")
+            continue
+        try:
+            entries = (((json.loads(m.group(1)).get("props") or {}).get("pageProps") or {}).get("timeline") or {}).get("entries") or []
+        except ValueError:
+            continue
+        posts = [p for p in (_x_from_timeline((e.get("content") or {}).get("tweet") or {}, handle) for e in entries
+                             if e.get("type") == "tweet") if p and (parse_iso(p["created_at"]) or now) >= week]
+        new += store_x_posts(posts, groups)
+        read += 1
+        if left and left.isdigit() and int(left) <= 3:   # stop before X has to refuse us
+            break
+    set_setting("xstate_tl_idx", str(i))
+    return " · ".join([f"X timelines: {read} account{_s(read)} read, {new} new post{_s(new)}", *notes])
 
 
 def fetch_x_gemini(cl: httpx.Client) -> str:
@@ -3473,7 +3599,7 @@ def _safe(fn, *args):
 def x_items(q: str = "", group: str = "all", sort: str = "latest", limit: int = 300, offset: int = 0,
             network: str = "all") -> tuple[list[dict], int]:
     where, params = [], []
-    if group in ("lab", "people", "press"):
+    if group in ("lab", "people", "press", "linked"):
         where.append("grp = ?")
         params.append(group)
     if network in ("x", "bsky"):
@@ -3500,7 +3626,7 @@ def x_info() -> dict:
     p = X_PROVIDERS[cfg["provider"]]
     gkey = bool((get_setting("gemini_api_key") or os.environ.get("WORKBENCH_GEMINI_KEY", "")).strip())
     return {"configured": bool(cfg["key"]), "provider": cfg["provider"], "provider_label": p["label"],
-            "gemini_search": {"has_key": gkey, "every_hours": GX_EVERY_HOURS, "message": get_setting("xstate_gx_msg"),
+            "gemini_search": {"enabled": GX_ENABLED, "has_key": gkey, "every_hours": GX_EVERY_HOURS, "message": get_setting("xstate_gx_msg"),
                               "last": get_setting("xstate_gx_last"), "by_website": bool(SITE_URL)},
             "bsky_accounts": [{"handle": h, "group": g} for h, g in bsky_accounts()],
             "per_post": p["per_post"], "cap": cfg["cap"], "reads_today": _x_reads_today(),

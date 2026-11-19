@@ -364,7 +364,7 @@ def build_snapshot(S, max_papers: int) -> dict:
 
 def x_snapshot(S) -> dict:
     """X posts for the website's X page (and x.json, which the desktop app reads when it has no key of its own)."""
-    items, total = S.x_items(limit=400)
+    items, total = S.x_items(limit=1500)   # a week of X (timelines + newsletter links) and Bluesky posts
     info = S.x_info()   # provider, cap, accounts, read count: never the key
     with S.db() as c:
         src = c.execute("SELECT status, message, last_success FROM sources WHERE name='x'").fetchone()

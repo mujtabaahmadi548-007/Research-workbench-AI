@@ -70,18 +70,19 @@ The **X & Bluesky** tab shows posts from AI labs, researchers and AI reporters (
 - **Bluesky** works with no key and costs nothing: 21 accounts that are active there (Simon Willison, Ethan Mollick,
   Nathan Lambert, Emily Bender, Arvind Narayanan, Ai2, Epoch AI, PyTorch, Casey Newton and others). Many AI people
   stopped posting on Bluesky, so they are only on X.
-- **X posts arrive three ways.** Every post is checked on X itself (X's public embed service) and shown with its
-  real text, so nothing is ever made up:
-  1. **Free, always on:** X posts that Hacker News, the news feeds and Bluesky link to.
-  2. **With your Gemini key (`GEMINI_API_KEY` secret):** every 3 hours Gemini uses Google Search to find the newest
-     posts of the X accounts (Anthropic, OpenAI, Google DeepMind, Gemini, Meta, Mistral, xAI, DeepSeek, Qwen,
-     Hugging Face, Karpathy, Sam Altman, Demis Hassabis and others). Google Search in Gemini only works on a key
-     with **billing turned on** (Google AI Studio → your project → Billing); it includes 5,000 free searches a
-     month and this uses roughly 1,000–2,500, so it should stay free. On a free key Google answers "quota
-     exceeded"; the app then tries again every hour (refused requests cost nothing) and the X page says so, so it
-     starts by itself once billing is active. Check that the key's project shows a paid plan in Google AI Studio →
-     API keys.
-  3. **Every post of every account:** an X API key, pay per use:
+- **X posts are free (no key, no card):**
+  1. **The accounts' own timelines:** X's public embed timelines (what an embedded X timeline on any website shows)
+     for the listed AI labs and people (Anthropic, OpenAI, Google DeepMind, Gemini, Meta, Mistral, xAI, DeepSeek,
+     Qwen, Hugging Face, Karpathy, Sam Altman, Demis Hassabis and others), with likes and pictures. X allows only
+     about 30 reads per window, so each website update reads 3 accounts in turn and pauses when X asks it to. Some
+     people's embed timelines are months old (e.g. Karpathy, Sam Altman); their posts arrive through 2. instead.
+  2. **Posts the AI newsletters link to:** Latent Space's daily AI Twitter recap, Zvi, Ben's Bites, Gary Marcus,
+     Understanding AI and others, plus Hacker News and Bluesky. Each post is checked on X (X's public oEmbed service)
+     and shown with its real text, so nothing is ever made up. Filter: **Linked in newsletters**.
+  Only posts from the last 7 days are kept.
+- **Optional paid extras (not needed):** Gemini + Google Search can look for the accounts' posts too, but Google
+  Search in Gemini needs a key with billing, so it is off (turn on with `WORKBENCH_GX_ENABLE=1`). An X API key reads
+  every post of every account, pay per use:
 
 | Service | Price | Get the key |
 |---|---|---|

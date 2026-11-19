@@ -913,7 +913,7 @@ function sX(q) {
   let rows = (X.items || []).filter(p => (p.created_at || '') >= weekAgo);   // posts older than 7 days never show
   const network = q.get('network') || 'all';
   if (network === 'x' || network === 'bsky') rows = rows.filter(p => (p.network || 'x') === network);
-  if (['lab', 'people', 'press'].includes(group)) rows = rows.filter(p => p.grp === group);
+  if (['lab', 'people', 'press', 'linked'].includes(group)) rows = rows.filter(p => p.grp === group);
   const toks = text.split(/\s+/).filter(Boolean).map(t => t.replace(/^@/, ''));
   if (toks.length) rows = rows.filter(p => { const hay = `${p.text} ${p.handle} ${p.name}`.toLowerCase(); return toks.every(t => hay.includes(t)); });
   if (sort === 'top') rows = [...rows].sort((a, b) => (b.likes || 0) - (a.likes || 0) || (b.created_at || '').localeCompare(a.created_at || ''));
@@ -2005,6 +2005,7 @@ function drawNews() {
 const xs = { q: '', group: 'all', sort: 'latest', network: 'all', items: [], more: false, req: 0, info: null };
 try { xs.sort = localStorage.getItem('wb.xSort') || 'latest'; } catch (e) { /* storage unavailable */ }
 const X_VIA = { hn: 'linked on Hacker News', news: 'linked in the news', bsky: 'linked on Bluesky', gemini: 'found by Gemini search' };
+const xViaLabel = v => !v || v === 'api' || v === 'timeline' ? null : v.startsWith('news:') ? 'linked in ' + v.slice(5) : X_VIA[v] || null;
 const NET = { x: { label: 'X', profile: h2 => 'https://x.com/' + h2, open: 'Open on X' }, bsky: { label: 'Bluesky', profile: h2 => 'https://bsky.app/profile/' + h2, open: 'Open on Bluesky' } };
 function renderX(ctx) {
   let timer = null;
@@ -2049,14 +2050,14 @@ function drawX() {
     `X: ${src.last_success ? 'checked ' + ago(src.last_success) : 'not checked yet'}${src.message ? ' · ' + src.message : ''}`].filter(Boolean).join(' · ');
   const setup = $('#xSetup');
   if (!r.configured) {
-    setup.replaceChildren(h('details', { class: 'card xconnect' }, h('summary', null, h('b', null, 'X posts: '),
-      'posts linked from the news are added for free; Gemini search or an X API key brings more. Show how'), xSetupCard(r)));
+    setup.replaceChildren(h('details', { class: 'card xconnect' }, h('summary', null, h('b', null, 'X posts are free: '),
+      'the labs\' own timelines plus the posts AI newsletters link to, all checked on X. Show how it works'), xSetupCard(r)));
   } else if (src.status && !['ok', 'running', 'never'].includes(src.status)) setup.replaceChildren(h('div', { class: 'note ' + (src.status === 'rate_limited' ? 'warn' : 'bad') }, src.message || 'X could not be read.'));
   else setup.replaceChildren();
   const accts = [...(r.accounts || []).map(a => ({ ...a, net: 'x' })), ...(r.bsky_accounts || []).map(a => ({ ...a, net: 'bsky' }))];
   $('#xGroups').replaceChildren(
     seg([['all', 'All'], ['x', 'X'], ['bsky', 'Bluesky']], xs.network, v => { xs.network = v; loadX(true); }),
-    seg([['all', 'Everyone'], ['lab', 'AI labs'], ['people', 'People'], ['press', 'Reporters']], xs.group, v => { xs.group = v; loadX(true); }),
+    seg([['all', 'Everyone'], ['lab', 'AI labs'], ['people', 'People'], ['press', 'Reporters'], ['linked', 'Linked in newsletters']], xs.group, v => { xs.group = v; loadX(true); }),
     h('details', { class: 'small muted acctlist' }, h('summary', null, `${accts.length} accounts`),
       h('p', null, accts.map(a => h('a', { href: NET[a.net].profile(a.handle), target: '_blank', rel: 'noopener noreferrer' }, `${a.net === 'x' ? '𝕏' : '🦋'} @${a.handle}`)).flatMap((a, i) => i ? [' ', a] : [a]))));
   $('#xMeta').textContent = r.total ? `${r.total} post${r.total === 1 ? '' : 's'} from the last 7 days${xs.q ? ` matching “${xs.q}”` : ''}` : '';
@@ -2087,7 +2088,7 @@ function xPost(p) {
         h('a', { class: 'muted', href: NET[net].profile(p.handle), target: '_blank', rel: 'noopener noreferrer' }, '@' + p.handle),
         h('span', { class: 'muted', title: new Date(p.created_at).toLocaleString() }, '· ' + ago(p.created_at)),
         p2(net === 'x' ? '𝕏' : '🦋 Bluesky', 'spec', 'Posted on ' + NET[net].label),
-        net === 'x' && X_VIA[p.via] ? p2(X_VIA[p.via], '', 'How this post got here (it was checked on X; likes and views are only known with an X API key)') : null,
+        net === 'x' && xViaLabel(p.via) ? p2(xViaLabel(p.via), '', 'How this post got here. It was checked on X and shows its real text.') : null,
         p.grp === 'lab' ? p2('AI lab', 'src-lab') : p.grp === 'press' ? p2('Reporter', '') : null),
       h('p', { class: 'xtext' }, xRich(p.text || '', net)),
       (p.media || []).length ? h('div', { class: 'xmedia' }, p.media.map(m => safeUrl(m.url) ? h('a', { href: (m.type === 'link' && (p.links || [])[0]) || url || m.url, target: '_blank', rel: 'noopener noreferrer' },
@@ -2197,23 +2198,24 @@ function xSetupCard(r) {
   const ext = (label, href) => h('a', { href, target: '_blank', rel: 'noopener noreferrer' }, label + ' ↗');
   const gs = r.gemini_search || {};
   return h('section', { class: 'card xsetup' },
-    h('h2', { style: { marginBottom: '6px' } }, 'How X posts get here'),
+    h('h2', { style: { marginBottom: '6px' } }, 'How X posts get here (free)'),
     h('ol', { class: 'small', style: { marginTop: 0 } },
-      h('li', null, h('b', null, 'Free, always on: '), 'X posts that Hacker News, the news feeds and Bluesky link to. Each one is checked on X and shown with its real text.'),
-      h('li', null, h('b', null, 'With your Gemini key: '), `Gemini searches Google every ${gs.every_hours || 3} hours for the newest posts of the X accounts listed, and every post it finds is checked on X before it is shown (nothing made up). Google Search in Gemini only works on a key with billing turned on (Google AI Studio → your project → Billing). It includes 5,000 free searches a month; this uses roughly 1,000–2,500, so it should stay free.`,
-        gs.message ? h('span', { class: 'xgs' }, ' Status: ', gs.message, '.') : (gs.has_key ? null : ' Add the GEMINI_API_KEY secret first.')),
-      h('li', null, h('b', null, 'Every post of every account: '), 'an X API key (pay per use).')),
-    h('p', { class: 'small', style: { margin: '10px 0 0' } }, `X API options (the app reads at most ${cap} posts a day, so the cost has a ceiling):`),
-    h('ol', { class: 'small' },
-      h('li', null, h('b', null, 'Official X API'), ` — $${(prov.x || {}).per_post || 0.005} per post read, ${month((prov.x || {}).per_post || 0.005)}. Create an app at `, ext('developer.x.com', 'https://developer.x.com'),
-        ', buy credits, set a spending limit, and copy the app\'s Bearer Token. ', ext('Pricing', 'https://docs.x.com/x-api/getting-started/pricing')),
-      h('li', null, h('b', null, 'twitterapi.io'), ` — an unofficial service, about $0.15 per 1,000 posts (${month((prov.twitterapi || {}).per_post || 0.00015)}); new accounts get $1 of free credit. Sign up at `, ext('twitterapi.io', 'https://twitterapi.io'), ' and copy the API key.')),
-    h('p', { class: 'small', style: { margin: '10px 0 0' } }, h('b', null, 'Where to put an X API key')),
-    h('ol', { class: 'small' },
-      h('li', null, 'Website (phone and computer): GitHub → your repository → Settings → Secrets and variables → Actions → ', h('b', null, 'New repository secret'), ' named ', h('code', null, 'X_API_KEY'),
-        '. For twitterapi.io also add, on the Variables tab, ', h('code', null, 'X_API_PROVIDER'), ' = ', h('code', null, 'twitterapi'), '. Posts appear here within about 5 minutes, and the desktop app then shows them too without a key of its own.',
-        repo ? [' ', ext('Open the secrets page', `https://github.com/${repo}/settings/secrets/actions`)] : null),
-      STATIC ? null : h('li', null, 'Or only on this computer: ', h('a', { href: '#/settings' }, 'Settings → X (Twitter)'), '.')));
+      h('li', null, h('b', null, 'The accounts\' own timelines: '), 'X\'s public embed timelines (what an embedded X timeline on any website shows) for the AI labs and people listed. X allows only a few reads at a time, so the website reads 3 accounts per update and goes round all of them about every 40 minutes. Some people\'s embed timelines are months old; those show up through the newsletters instead.'),
+      h('li', null, h('b', null, 'Posts the AI newsletters link to: '), 'Latent Space\'s daily AI Twitter recap, Zvi, Ben\'s Bites, Gary Marcus and others, plus Hacker News and Bluesky. Each post is checked on X and shown with its real text (filter: "Linked in newsletters").'),
+      h('li', null, 'Only posts from the last 7 days are kept. Nothing here costs anything or needs a card.')),
+    h('details', { class: 'small' }, h('summary', null, 'Optional paid extras (not needed)'),
+      h('p', { class: 'small', style: { margin: '8px 0 0' } }, 'Gemini search for X posts needs a Gemini key with billing, so it is switched off.'),
+      h('p', { class: 'small', style: { margin: '8px 0 0' } }, `An X API key reads every post of every listed account (the app reads at most ${cap} posts a day, so the cost has a ceiling):`),
+      h('ol', { class: 'small' },
+        h('li', null, h('b', null, 'Official X API'), ` — $${(prov.x || {}).per_post || 0.005} per post read, ${month((prov.x || {}).per_post || 0.005)}. Create an app at `, ext('developer.x.com', 'https://developer.x.com'),
+          ', buy credits, set a spending limit, and copy the app\'s Bearer Token. ', ext('Pricing', 'https://docs.x.com/x-api/getting-started/pricing')),
+        h('li', null, h('b', null, 'twitterapi.io'), ` — an unofficial service, about $0.15 per 1,000 posts (${month((prov.twitterapi || {}).per_post || 0.00015)}); new accounts get $1 of free credit. Sign up at `, ext('twitterapi.io', 'https://twitterapi.io'), ' and copy the API key.')),
+      h('p', { class: 'small', style: { margin: '10px 0 0' } }, h('b', null, 'Where to put an X API key')),
+      h('ol', { class: 'small' },
+        h('li', null, 'Website (phone and computer): GitHub → your repository → Settings → Secrets and variables → Actions → ', h('b', null, 'New repository secret'), ' named ', h('code', null, 'X_API_KEY'),
+          '. For twitterapi.io also add, on the Variables tab, ', h('code', null, 'X_API_PROVIDER'), ' = ', h('code', null, 'twitterapi'), '. Posts appear here within about 5 minutes, and the desktop app then shows them too without a key of its own.',
+          repo ? [' ', ext('Open the secrets page', `https://github.com/${repo}/settings/secrets/actions`)] : null),
+        STATIC ? null : h('li', null, 'Or only on this computer: ', h('a', { href: '#/settings' }, 'Settings → X (Twitter)'), '.'))));
 }
 
 /* --- Highest alerts (website): official model releases and major breakthroughs, found by alerts.py --- */
