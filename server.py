@@ -3115,8 +3115,13 @@ def fetch_x() -> None:
     if cfg["key"]:
         status, msg = _fetch_x_api(cfg)
         parts.append(msg)
-    if SITE_URL:   # desktop app: the website does the free X work; copy its posts
-        parts.append(sync_site_x())
+    if SITE_URL:   # desktop app: copy the website's X posts, and read the embed timelines from this computer too
+        parts.append(sync_site_x())   # (X often refuses GitHub's shared servers, but answers home connections)
+        try:
+            with httpx.Client(timeout=HTTP_TIMEOUT, verify=SSL_CTX, headers={"User-Agent": BROWSER_UA}) as cl:
+                parts.append(fetch_x_timelines(cl))
+        except Exception as exc:
+            parts.append(f"X timelines failed ({describe_http_error(exc)[1]})")
     else:
         try:
             with httpx.Client(timeout=HTTP_TIMEOUT, verify=SSL_CTX, headers={"User-Agent": BROWSER_UA}) as cl:

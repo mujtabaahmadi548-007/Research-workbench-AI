@@ -2200,7 +2200,7 @@ function xSetupCard(r) {
   return h('section', { class: 'card xsetup' },
     h('h2', { style: { marginBottom: '6px' } }, 'How X posts get here (free)'),
     h('ol', { class: 'small', style: { marginTop: 0 } },
-      h('li', null, h('b', null, 'The accounts\' own timelines: '), 'X\'s public embed timelines (what an embedded X timeline on any website shows) for the AI labs and people listed. X allows only a few reads at a time, so the website reads 3 accounts per update and goes round all of them about every 40 minutes. Some people\'s embed timelines are months old; those show up through the newsletters instead.'),
+      h('li', null, h('b', null, 'The accounts\' own timelines: '), 'X\'s public embed timelines (what an embedded X timeline on any website shows) for the AI labs and people listed, with likes and pictures. X allows only a few reads at a time and often refuses GitHub\'s shared servers, so these come mostly from the desktop app on your own connection (the website keeps trying and pauses when X says so). Some people\'s embed timelines are months old; their posts show up through the newsletters instead.'),
       h('li', null, h('b', null, 'Posts the AI newsletters link to: '), 'Latent Space\'s daily AI Twitter recap, Zvi, Ben\'s Bites, Gary Marcus and others, plus Hacker News and Bluesky. Each post is checked on X and shown with its real text (filter: "Linked in newsletters").'),
       h('li', null, 'Only posts from the last 7 days are kept. Nothing here costs anything or needs a card.')),
     h('details', { class: 'small' }, h('summary', null, 'Optional paid extras (not needed)'),

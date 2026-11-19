@@ -74,7 +74,8 @@ The **X & Bluesky** tab shows posts from AI labs, researchers and AI reporters (
   1. **The accounts' own timelines:** X's public embed timelines (what an embedded X timeline on any website shows)
      for the listed AI labs and people (Anthropic, OpenAI, Google DeepMind, Gemini, Meta, Mistral, xAI, DeepSeek,
      Qwen, Hugging Face, Karpathy, Sam Altman, Demis Hassabis and others), with likes and pictures. X allows only
-     about 30 reads per window, so each website update reads 3 accounts in turn and pauses when X asks it to. Some
+     a few reads per window and often refuses GitHub's shared servers, so these come mostly from the desktop app
+     on your own connection; the website keeps trying 3 accounts per update and pauses when X asks it to. Some
      people's embed timelines are months old (e.g. Karpathy, Sam Altman); their posts arrive through 2. instead.
   2. **Posts the AI newsletters link to:** Latent Space's daily AI Twitter recap, Zvi, Ben's Bites, Gary Marcus,
      Understanding AI and others, plus Hacker News and Bluesky. Each post is checked on X (X's public oEmbed service)
