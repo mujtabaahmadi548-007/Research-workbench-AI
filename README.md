@@ -13,9 +13,10 @@ It also runs as a **website** (GitHub Pages) that you can open on your phone and
 
 ## Use it as a website (phone and computer)
 
-GitHub builds and publishes the website for you about every 10 minutes (`.github/workflows/update-site.yml`: each
+GitHub builds and publishes the website for you about every 5 minutes (`.github/workflows/update-site.yml`: each
 run starts the next one, because GitHub's own schedules run hours late), so it stays live without your computer.
-An open page checks for a new build every minute and shows it without a reload.
+An open page checks for a new build every minute and shows it without a reload, and it checks Hacker News and
+Bluesky itself every minute: the **⚡ Live** box at the top of News lists everything from the last 3 hours.
 
 It is built to keep running without attention: the website updates and the alerts loop restart each other if one
 stops, both re-enable themselves so GitHub does not switch them off after 60 quiet days (after 30 days without a
@@ -26,12 +27,12 @@ commit a small heartbeat file, `.github/heartbeat.txt`, is committed automatical
 2. Under **Build and deployment → Source**, choose **GitHub Actions**.
    (If GitHub says Pages needs an upgrade for private repositories, make the repository public under
    **Settings → General → Danger Zone → Change visibility**, or use the free GitHub Pro from GitHub Education.)
-3. Open the **Actions** tab → **Update website** → **Run workflow**. After about 10 minutes the site is at
+3. Open the **Actions** tab → **Update website** → **Run workflow**. After about 5 minutes the site is at
    `https://<your-github-name>.github.io/Research-workbench-AI/` (also shown on the Settings → Pages screen).
 
 On the website:
 
-- **News, Papers, Repos, Systems Lab, Evolution graph and Review** all work. News and papers are refreshed about every 10 minutes; the sidebar shows "Live · updated … ago".
+- **News, Papers, Repos, Systems Lab, Evolution graph and Review** all work. News and papers are refreshed about every 5 minutes (Hacker News and Bluesky every minute); the sidebar shows "Live · updated … ago".
 - **Gemini features** (paper breakdowns, Triage, + Review cards, Frontier Brief): paste your Gemini key in the site's
   **Settings**. The key is saved only in that browser and sent only to Google; it is never part of the site or the repository.
 - **Your progress** (review schedule, read marks, breakdowns) is saved in each browser, so your phone and your computer each keep their own.
@@ -62,11 +63,15 @@ breakthrough** happened, and notifies you (`alerts.py`, `.github/workflows/alert
   announcement. GitHub pauses scheduled workflows in repositories with no commits for 60 days (it emails you first);
   click **Enable workflow** on the Actions tab if that happens.
 
-### X (Twitter) page
+### X & Bluesky page
 
-The **X (Twitter)** tab shows posts from AI labs and researchers (Anthropic, OpenAI, Google DeepMind, Gemini, Meta,
-Mistral, xAI, DeepSeek, Qwen, Hugging Face, Karpathy, Sam Altman, Demis Hassabis and others; replies and reposts
-left out). X has no free way to read posts, so it needs one paid, pay-per-use key:
+The **X & Bluesky** tab shows posts from AI labs, researchers and AI reporters (replies and reposts left out).
+
+- **Bluesky** works with no key and costs nothing: 21 accounts that are active there (Simon Willison, Ethan Mollick,
+  Nathan Lambert, Emily Bender, Arvind Narayanan, Ai2, Epoch AI, PyTorch, Casey Newton and others). Many AI people
+  stopped posting on Bluesky, so they are only on X.
+- **X** (Anthropic, OpenAI, Google DeepMind, Gemini, Meta, Mistral, xAI, DeepSeek, Qwen, Hugging Face, Karpathy,
+  Sam Altman, Demis Hassabis and others) has no free way to read posts, so it needs one paid, pay-per-use key:
 
 | Service | Price | Get the key |
 |---|---|---|
@@ -251,8 +256,9 @@ from arXiv the first time the app is online.
 - **arXiv** is called at most once every 3 seconds (its API) and once every 15 seconds (its web pages, for
   figures). **GitHub** without a token allows 60 requests per hour, so releases are re-checked at most
   every 30 minutes.
-- **News feeds** (33: lab blogs incl. Anthropic, Mistral, Google Developers and Apple ML; AI press; expert
-  newsletters) that fail show their own error on the News page under "Feeds (show all)". Anthropic has no RSS
+- **News feeds** (67: lab and company blogs incl. Anthropic, Mistral, Google Developers, Microsoft, Apple ML, METR;
+  AI press incl. Techmeme, NYT, The Guardian, Wired, IEEE Spectrum; expert newsletters and research blogs incl.
+  Epoch AI, Import AI, TLDR AI, Zvi, Gary Marcus, Lilian Weng, Karpathy; Lobsters) that fail show their own error on the News page under "Feeds (show all)". Anthropic has no RSS
   feed, so its news page is read directly. Meta AI and xAI have no usable feed; they are covered through press,
   newsletters, Hacker News and the X page.
 - **Duplicates:** reports of one event are merged into one card (same model, same link, or the same headline in
@@ -292,7 +298,7 @@ from the list (any model with "flash" in its name is a good choice), then click 
 | --- | --- |
 | `server.py` | FastAPI server: paper, news, model and GitHub ingestion, figures and preview images, importance scoring, SQLite + FTS5 storage, Gemini calls with JSON validation and a retry queue, SM-2 scheduling, starter content. |
 | `index.html` | The whole user interface: vanilla JavaScript and SVG, no build step. The same page runs the website (it switches to website mode when `data.js` is present). |
-| `build_site.py` | Builds the website into `site/`: fetches sources, then writes `data.js`, `version.json` and `index.html`. GitHub Actions runs it about every 10 minutes. |
+| `build_site.py` | Builds the website into `site/`: fetches sources, then writes `data.js`, `version.json` and `index.html`. GitHub Actions runs it about every 5 minutes. |
 | `.github/workflows/update-site.yml` | The GitHub Actions workflow that builds and publishes the website to GitHub Pages. |
 | `alerts.py` | Highest alerts: detects official Claude / Gemini / GPT releases and major breakthroughs, and notifies you. |
 | `.github/workflows/alerts.yml` | Runs `alerts.py` every 5 minutes on GitHub. |

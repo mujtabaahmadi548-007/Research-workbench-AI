@@ -1,6 +1,6 @@
 """Build the website version of the Workbench (for GitHub Pages) into the site/ folder.
 
-GitHub Actions runs this about every 10 minutes (.github/workflows/update-site.yml), so the website stays live
+GitHub Actions runs this about every 5 minutes (.github/workflows/update-site.yml), so the website stays live
 without your computer. Each build also writes version.json; open pages check it once a minute and load the new
 data.js by themselves. You can also run it yourself and open site/index.html in a browser:
 
@@ -29,7 +29,7 @@ HERE = Path(__file__).resolve().parent
 PLACEHOLDER = "<!-- STATIC_DATA -->"
 KEEP_SETTINGS = ("news_sync_at", "news_visit_last", "news_visit_prev", "new_per_day", "score_version",
                  "gh_releases_last", "arxiv_max_results", "hf_limit", "custom_feeds",
-                 "site_gemini_last", "site_gemini_report", "x_provider", "x_accounts", "x_daily_cap")
+                 "site_gemini_last", "site_gemini_report", "x_provider", "x_accounts", "x_daily_cap", "bsky_accounts")
 KEEP_PREFIXES = ("feed_baseline:", "xstate_")   # undated-feed memory; X read positions and today's read count
 
 

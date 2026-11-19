@@ -258,6 +258,27 @@ details.feeds summary{cursor:pointer;font-size:13.5px;color:var(--ink-2);font-we
 .xpost .xfoot{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;font-size:12.5px;color:var(--ink-3)}
 .xpost .xfoot a{font-weight:600}
 .xsetup ol{margin:6px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:6px}
+details.xconnect{padding:10px 14px;margin:0 0 8px}
+details.xconnect>summary{cursor:pointer;font-size:13.5px}
+details.xconnect .xsetup{border:0;box-shadow:none;padding:10px 0 0;background:transparent}
+details.acctlist{max-width:100%}
+details.acctlist summary{cursor:pointer}
+details.acctlist p{margin:6px 0 0;line-height:1.8}
+.livebox{background:var(--surface);border:1px solid var(--line);border-left:4px solid var(--accent);border-radius:var(--radius);padding:12px 16px;margin:16px 0 0}
+.live-h{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px}
+.live-h h2{font-size:17px;display:flex;align-items:center;gap:8px}
+.pulse{width:9px;height:9px;border-radius:50%;background:var(--good);box-shadow:0 0 0 0 var(--good);animation:livepulse 2s infinite}
+@keyframes livepulse{0%{box-shadow:0 0 0 0 color-mix(in srgb,var(--good) 60%,transparent)}70%{box-shadow:0 0 0 8px transparent}100%{box-shadow:0 0 0 0 transparent}}
+@media (prefers-reduced-motion:reduce){.pulse{animation:none}}
+.livebox ul{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}
+.livebox li{display:grid;grid-template-columns:62px minmax(0,auto) minmax(0,1fr) auto;gap:4px 10px;align-items:baseline;font-size:14px;line-height:1.4}
+.livebox li a{font-weight:600;color:var(--ink);overflow-wrap:anywhere}
+.livebox .lt{color:var(--ink-3);font-size:12.5px;white-space:nowrap}
+.livebox .ls{color:var(--accent);font-size:12px;font-weight:650;white-space:nowrap;max-width:150px;overflow:hidden;text-overflow:ellipsis}
+.livebox .lp{color:var(--ink-3);font-size:12px;font-weight:500;white-space:nowrap}
+.livebox details{margin-top:6px}
+.livebox details summary{cursor:pointer;color:var(--accent);font-weight:600;font-size:13px}
+@media (max-width:560px){.livebox li{grid-template-columns:52px minmax(0,1fr)}.livebox .ls{grid-column:2}.livebox li>a,.livebox li>span:nth-child(3){grid-column:1/-1}.livebox .lp{grid-column:1/-1}}
 .xsetup code{font-size:12.5px}
 .ev.unread .ev-title::before,.crow.unread .ev-title::before{content:"";display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--accent);margin-right:7px;vertical-align:2px}
 ul.triage{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:6px;font-size:13.5px;color:var(--ink-2)}
@@ -699,7 +720,7 @@ function toast(msg, kind = '') {
 
 /* ======================================================================
    Website mode (GitHub Pages). There is no server: news, papers and repos come from data.js, which GitHub
-   Actions rebuilds about every 10 minutes (build_site.py); the page loads each new build by itself (see "Live
+   Actions rebuilds about every 5 minutes (build_site.py); the page loads each new build by itself (see "Live
    updates" below). Review progress, read marks, Gemini breakdowns and the Gemini key are kept in this browser
    (localStorage). Gemini is called directly from the browser.
    ====================================================================== */
@@ -725,7 +746,7 @@ function siteNote() {
   const u = siteActionsUrl();
   return h('div', { class: 'note', id: 'siteNote', style: { margin: '0 0 16px' } },
     h('b', null, 'This website is live. '),
-    `GitHub fetches fresh news, models and papers about every 10 minutes, and this page loads each update by itself, no reload needed (last update ${ago(D.generated_at)}). `,
+    `GitHub fetches fresh news, models and papers about every 5 minutes, and this page loads each update by itself, no reload needed (last update ${ago(D.generated_at)}). `,
     u ? ['If it ever falls behind, open ', h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, 'Update website on GitHub ↗'), ' and press "Run workflow".'] : '');
 }
 
@@ -733,9 +754,9 @@ function siteNote() {
    visible and swaps the new data in without a reload. At the top of the News page new stories appear by
    themselves; further down (or while searching) a "new stories" pill offers them instead of moving the page. --- */
 const live = { failed: 0, pending: 0, loading: false, timer: null };
-const LIVE_CHECK_MS = 60000, LIVE_LATE_MS = 45 * 60000;
+const LIVE_CHECK_MS = 60000, LIVE_LATE_MS = 30 * 60000;
 const liveLate = () => Date.now() - Date.parse(D.generated_at) > LIVE_LATE_MS;
-const siteStampText = () => liveLate() ? `Updates are delayed: last update ${ago(D.generated_at)}.` : `Live · updated ${ago(D.generated_at)} · refreshes about every 10 minutes.`;
+const siteStampText = () => liveLate() ? `Updates are delayed: last update ${ago(D.generated_at)}.` : `Live · updated ${ago(D.generated_at)} · refreshes about every 5 minutes.`;
 async function liveCheck() {
   clearTimeout(live.timer);
   if (!STATIC) return;
@@ -772,6 +793,7 @@ function liveSwap(nd) {
   if (app.view === 'x' && $('#xList')) { if (window.scrollY < 300) loadX(true); return; }
   if (app.view !== 'news' || !$('#newsList')) return;   // other pages read the new data the next time they load
   const al = $('#main .alerts'); if (al) al.replaceWith(alertsView());
+  if ($('#liveBox')) liveNewsTick();
   updateNewsStatus(); loadNewsFeeds();
   if ((D.brief || {}).generated_at !== oldBrief) loadBrief();
   if (!added) return;
@@ -795,13 +817,19 @@ if (STATIC) {
   document.addEventListener('visibilitychange', () => { if (!document.hidden) liveCheck(); });
   window.addEventListener('online', liveCheck);
 }
+// Coming back to the tab (or the phone screen turning on) checks the live sources right away, not a minute later.
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden) return;
+  if ($('#liveBox')) liveNewsTick();
+  if (STATIC && $('#xList')) liveBskyTick();
+});
 
 async function staticApi(path, opts = {}) {
   const u = new URL(path, 'https://wb.local');
   const p = u.pathname, q = u.searchParams, method = (opts.method || 'GET').toUpperCase(), body = opts.body || {};
   let x;
   if (p === '/api/status') return sStatus();
-  if (p === '/api/refresh') return { started: false, message: 'This website updates itself about every 10 minutes.' };
+  if (p === '/api/refresh') return { started: false, message: 'This website updates itself about every 5 minutes.' };
   if (p === '/api/news') return sNews(q);
   if (p === '/api/news/visit') return sVisit();
   if (p === '/api/news/seen') return sSeen(body);
@@ -882,7 +910,9 @@ function sX(q) {
   const text = (q.get('q') || '').trim().toLowerCase(), group = q.get('group') || 'all', sort = q.get('sort') || 'latest';
   const limit = clamp(+q.get('limit') || 40, 1, 200), offset = Math.max(0, +q.get('offset') || 0);
   let rows = X.items || [];
-  if (group === 'lab' || group === 'people') rows = rows.filter(p => p.grp === group);
+  const network = q.get('network') || 'all';
+  if (network === 'x' || network === 'bsky') rows = rows.filter(p => (p.network || 'x') === network);
+  if (['lab', 'people', 'press'].includes(group)) rows = rows.filter(p => p.grp === group);
   const toks = text.split(/\s+/).filter(Boolean).map(t => t.replace(/^@/, ''));
   if (toks.length) rows = rows.filter(p => { const hay = `${p.text} ${p.handle} ${p.name}`.toLowerCase(); return toks.every(t => hay.includes(t)); });
   if (sort === 'top') rows = [...rows].sort((a, b) => (b.likes || 0) - (a.likes || 0) || (b.created_at || '').localeCompare(a.created_at || ''));
@@ -1612,7 +1642,7 @@ function widthOf(el, fallback = 640) { const w = el && el.clientWidth; return w 
    ====================================================================== */
 const app = { status: null, token: 0, cleanup: [], statusTimer: null, wasRefreshing: false, view: '' };
 const NAV = [
-  ['news', 'News', 'news'], ['x', 'X (Twitter)', 'x'], ['feed', 'Papers', 'feed'], ['lab', 'Systems Lab', 'lab'], ['graph', 'Evolution graph', 'graph'], ['review', 'Review', 'review'], ['settings', 'Settings', 'settings'],
+  ['news', 'News', 'news'], ['x', 'X & Bluesky', 'x'], ['feed', 'Papers', 'feed'], ['lab', 'Systems Lab', 'lab'], ['graph', 'Evolution graph', 'graph'], ['review', 'Review', 'review'], ['settings', 'Settings', 'settings'],
 ];
 function drawNav() {
   const due = app.status ? app.status.counts.due : 0;
@@ -1622,11 +1652,11 @@ function drawNav() {
 function drawSideStatus() {
   const st = app.status, box = $('#sideStatus');
   if (!st) { box.replaceChildren(h('div', { class: 'src' }, h('span', { class: 'dot error' }), 'Server not reachable')); return; }
-  const short = { huggingface: 'HF papers', arxiv: 'arXiv', github: 'GitHub', news: 'News feeds', models: 'HF models', hn: 'Hacker News', x: 'X posts' };
+  const short = { huggingface: 'HF papers', arxiv: 'arXiv', github: 'GitHub', news: 'News feeds', models: 'HF models', hn: 'Hacker News', x: 'X posts', bsky: 'Bluesky' };
   box.replaceChildren(
     ...st.sources.map(src => h('div', { class: 'src', title: src.message || '' }, h('span', { class: 'dot ' + src.status }), `${short[src.name] || src.name}: ${src.status === 'running' ? 'fetching…' : ago(src.last_success)}`)),
     h('div', { class: 'src' }, h('span', { class: 'dot ' + (st.gemini.has_key ? 'ok' : 'never') }), st.gemini.has_key ? 'Gemini key set' + (STATIC ? ' (this browser)' : '') : 'No Gemini key'),
-    ...(STATIC ? [h('div', { class: 'src', title: 'GitHub rebuilds the website about every 10 minutes; this page checks for a new build every minute and loads it by itself' },
+    ...(STATIC ? [h('div', { class: 'src', title: 'GitHub rebuilds the website about every 5 minutes; this page checks for a new build every minute and loads it by itself' },
       h('span', { class: 'dot ' + (liveLate() ? 'offline' : 'ok') }), (liveLate() ? 'Updates delayed · last ' : 'Live · updated ') + ago(D.generated_at))] : []));
   const stamp = $('#siteStamp'); if (stamp && STATIC) stamp.textContent = siteStampText();
 }
@@ -1700,7 +1730,7 @@ async function doRefresh() {
     const before = D.generated_at;
     await liveCheck();
     if (D.generated_at !== before) { if ($('#livePill')) liveShow(); else if (!$('#toasts').children.length) toast('Loaded the latest update.'); }
-    else toast(live.failed ? 'Could not check for updates (offline?).' : `Already up to date: updated ${ago(D.generated_at)}. New data arrives about every 10 minutes.`, live.failed ? 'bad' : '');
+    else toast(live.failed ? 'Could not check for updates (offline?).' : `Already up to date: updated ${ago(D.generated_at)}. New data arrives about every 5 minutes.`, live.failed ? 'bad' : '');
     const old = $('#siteNote'), head = $('#main .view-head');
     if (old) old.remove();
     if (liveLate() && head) head.after(siteNote());   // explain how to restart updates only when they are late
@@ -1865,6 +1895,7 @@ function renderNews(ctx) {
     h('div', { class: 'sources', id: 'newsSources' }),
     h('details', { class: 'feeds' }, h('summary', { id: 'feedsSummary' }, 'Feeds'), h('div', { class: 'feedlist', id: 'feedList' })),
     STATIC ? alertsView() : null,
+    h('div', { id: 'liveBox' }),
     h('div', { id: 'briefBox' }),
     h('div', { class: 'toolbar', style: { marginTop: '18px' } }, h('label', { class: 'search' }, icon('search'), input), kindSel, sortSel),
     h('div', { class: 'toolbar', id: 'viewBar' }),
@@ -1878,6 +1909,8 @@ function renderNews(ctx) {
   api('/api/news/visit', { method: 'POST', body: {} }).then(r => { news.lastVisit = r.last_visit; }).catch(() => {}).finally(() => loadNews(true));
   loadNewsFeeds();
   loadBrief();
+  liveNewsTick();
+  app.cleanup.push(() => clearTimeout(liveFeed.timer));
 }
 function drawViewBar() {
   const bar = $('#viewBar'); if (!bar) return;
@@ -1966,19 +1999,20 @@ function drawNews() {
    X (Twitter): posts from AI labs and researchers. The server (or the website build) reads them with the
    user's own API key; without a key this page explains the two options and what they cost.
    ====================================================================== */
-const xs = { q: '', group: 'all', sort: 'latest', items: [], more: false, req: 0, info: null };
+const xs = { q: '', group: 'all', sort: 'latest', network: 'all', items: [], more: false, req: 0, info: null };
 try { xs.sort = localStorage.getItem('wb.xSort') || 'latest'; } catch (e) { /* storage unavailable */ }
+const NET = { x: { label: 'X', profile: h2 => 'https://x.com/' + h2, open: 'Open on X' }, bsky: { label: 'Bluesky', profile: h2 => 'https://bsky.app/profile/' + h2, open: 'Open on Bluesky' } };
 function renderX(ctx) {
   let timer = null;
-  const input = h('input', { type: 'search', placeholder: 'Search posts and accounts…', value: xs.q, 'aria-label': 'Search X posts',
+  const input = h('input', { type: 'search', placeholder: 'Search posts and accounts…', value: xs.q, 'aria-label': 'Search posts',
     oninput: () => { clearTimeout(timer); timer = setTimeout(() => { xs.q = input.value; loadX(true); }, 280); } });
   const sortSel = h('select', { 'aria-label': 'Sort', onchange: () => { xs.sort = sortSel.value; try { localStorage.setItem('wb.xSort', xs.sort); } catch (e) { /* ignore */ } loadX(true); } },
     [['latest', 'Latest first'], ['top', 'Most liked']].map(([v, t]) => h('option', { value: v }, t)));
   sortSel.value = xs.sort;
   ctx.main.append(
     h('header', { class: 'view-head' },
-      h('div', null, h('h1', null, 'X (Twitter)'),
-        h('p', { class: 'sub' }, 'Posts from AI labs and researchers on X, newest first. Replies and reposts are left out.'),
+      h('div', null, h('h1', null, 'X & Bluesky'),
+        h('p', { class: 'sub' }, 'Posts from AI labs, researchers and AI reporters on X and Bluesky, newest first. Replies and reposts are left out.'),
         h('p', { class: 'small', id: 'xStamp' })),
       STATIC ? null : h('button', { class: 'btn primary', id: 'xRefresh', onclick: refreshX }, icon('refresh'), h('span', null, 'Refresh'))),
     h('div', { id: 'xSetup' }),
@@ -1988,15 +2022,16 @@ function renderX(ctx) {
     h('div', { id: 'xList' }, h('div', { class: 'loading' }, 'Loading posts…')),
     h('div', { id: 'xMore', style: { textAlign: 'center', marginTop: '14px' } }));
   loadX(true);
+  if (STATIC) { liveBskyTick(); app.cleanup.push(() => clearTimeout(bskyLive.timer)); }
 }
 async function refreshX() {
-  try { const r = await api('/api/refresh', { method: 'POST', body: { sources: ['x'] } }); toast(r.started ? 'Reading new posts from X…' : r.message); app.wasRefreshing = true; pollStatus(); }
+  try { const r = await api('/api/refresh', { method: 'POST', body: { sources: ['x', 'bsky'] } }); toast(r.started ? 'Reading new posts…' : r.message); app.wasRefreshing = true; pollStatus(); }
   catch (e) { toast(e.message, 'bad'); }
 }
 async function loadX(reset = true) {
   const req = ++xs.req, offset = reset ? 0 : xs.items.length;
   try {
-    const r = await api('/api/x?' + new URLSearchParams({ q: xs.q, group: xs.group, sort: xs.sort, limit: 40, offset }));
+    const r = await api('/api/x?' + new URLSearchParams({ q: xs.q, group: xs.group, sort: xs.sort, network: xs.network, limit: 40, offset }));
     if (req !== xs.req || !$('#xList')) return;
     xs.info = r; xs.items = reset ? r.items : xs.items.concat(r.items); xs.more = r.more;
     drawX();
@@ -2004,31 +2039,38 @@ async function loadX(reset = true) {
 }
 function drawX() {
   const r = xs.info, list = $('#xList'); if (!r || !list) return;
-  const src = r.source || {};
-  $('#xStamp').textContent = r.configured || src.last_success
-    ? [src.last_success ? 'Last read ' + ago(src.last_success) : null, src.message || r.provider_label].filter(Boolean).join(' · ')
-    : '';
+  const src = r.source || {}, bsrc = r.bsky_source || {};
+  const bLast = STATIC && bskyLive.at ? bskyLive.at : bsrc.last_success;
+  $('#xStamp').textContent = [bLast ? `Bluesky: checked ${ago(bLast)}${STATIC ? ' (this page checks every minute)' : ''}` : null,
+    r.configured || src.last_success ? `X: ${src.last_success ? 'read ' + ago(src.last_success) + ' · ' : ''}${src.message || r.provider_label}` : 'X: not connected yet'].filter(Boolean).join(' · ');
   const setup = $('#xSetup');
-  if (!r.configured && !(r.items || []).length && !src.last_success) setup.replaceChildren(xSetupCard(r));
-  else if (src.status && !['ok', 'running', 'never'].includes(src.status)) setup.replaceChildren(h('div', { class: 'note ' + (src.status === 'rate_limited' ? 'warn' : 'bad') }, src.message || 'X could not be read.'));
+  if (!r.configured && !src.last_success) {
+    setup.replaceChildren(h('details', { class: 'card xconnect' }, h('summary', null, h('b', null, 'X posts need an API key'), ' — Bluesky posts below are free. Show how to connect X'), xSetupCard(r)));
+  } else if (src.status && !['ok', 'running', 'never'].includes(src.status)) setup.replaceChildren(h('div', { class: 'note ' + (src.status === 'rate_limited' ? 'warn' : 'bad') }, src.message || 'X could not be read.'));
   else setup.replaceChildren();
-  $('#xGroups').replaceChildren(seg([['all', 'All'], ['lab', 'AI labs'], ['people', 'People']], xs.group, v => { xs.group = v; loadX(true); }),
-    h('span', { class: 'muted small' }, `${(r.accounts || []).length} accounts: ` + (r.accounts || []).slice(0, 8).map(a => '@' + a.handle).join(', ') + ((r.accounts || []).length > 8 ? ' …' : '')));
+  const accts = [...(r.accounts || []).map(a => ({ ...a, net: 'x' })), ...(r.bsky_accounts || []).map(a => ({ ...a, net: 'bsky' }))];
+  $('#xGroups').replaceChildren(
+    seg([['all', 'All'], ['x', 'X'], ['bsky', 'Bluesky']], xs.network, v => { xs.network = v; loadX(true); }),
+    seg([['all', 'Everyone'], ['lab', 'AI labs'], ['people', 'People'], ['press', 'Reporters']], xs.group, v => { xs.group = v; loadX(true); }),
+    h('details', { class: 'small muted acctlist' }, h('summary', null, `${accts.length} accounts`),
+      h('p', null, accts.map(a => h('a', { href: NET[a.net].profile(a.handle), target: '_blank', rel: 'noopener noreferrer' }, `${a.net === 'x' ? '𝕏' : '🦋'} @${a.handle}`)).flatMap((a, i) => i ? [' ', a] : [a]))));
   $('#xMeta').textContent = r.total ? `${r.total} post${r.total === 1 ? '' : 's'} from the last 7 days${xs.q ? ` matching “${xs.q}”` : ''}` : '';
   if (!xs.items.length) {
-    list.replaceChildren(r.configured || src.last_success ? h('div', { class: 'card empty' }, xs.q || xs.group !== 'all' ? 'No posts match.' : 'No posts yet. New posts appear after the next update.') : h('div'));
+    list.replaceChildren(h('div', { class: 'card empty' }, xs.q || xs.group !== 'all' || xs.network !== 'all' ? 'No posts match.' : 'No posts yet. New posts appear after the next update.'));
   } else list.replaceChildren(h('div', { class: 'xlist' }, xs.items.map(xPost)));
   $('#xMore').replaceChildren(...(xs.more ? [h('button', { class: 'btn', onclick: () => loadX(false) }, 'Load more')] : []));
 }
-function xRich(text) {
+function xRich(text, net = 'x') {
   // links and @handles become links; everything else stays plain text (never parsed as HTML)
-  return text.split(/(https?:\/\/[^\s]+|@[A-Za-z0-9_]{1,15}\b)/g).filter(Boolean).map(part => {
-    if (part.startsWith('@')) return h('a', { href: 'https://x.com/' + part.slice(1), target: '_blank', rel: 'noopener noreferrer' }, part);
+  const mention = net === 'bsky' ? '@[a-z0-9][a-z0-9.-]*\\.[a-z]{2,}' : '@[A-Za-z0-9_]{1,15}\\b';
+  return text.split(new RegExp(`(https?:\\/\\/[^\\s]+|${mention})`, 'g')).filter(Boolean).map(part => {
+    if (part.startsWith('@')) return h('a', { href: NET[net].profile(part.slice(1)), target: '_blank', rel: 'noopener noreferrer' }, part);
     const u = /^https?:\/\//.test(part) && safeUrl(part.replace(/[).,;!?]+$/, ''));
     return u ? h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, u.replace(/^https?:\/\/(www\.)?/, '').slice(0, 60)) : part;
   });
 }
 function xPost(p) {
+  const net = NET[p.network] ? p.network : 'x';
   const url = safeUrl(p.url), av = safeUrl(p.avatar);
   const initial = (p.name || p.handle || '?')[0].toUpperCase();
   const avatar = h('div', { class: 'xav' }, av ? h('img', { src: av, alt: '', loading: 'lazy', referrerpolicy: 'no-referrer', onerror: e => e.target.replaceWith(initial) }) : initial);
@@ -2037,14 +2079,110 @@ function xPost(p) {
     avatar,
     h('div', null,
       h('div', { class: 'xhead' }, h('b', null, p.name || p.handle), p.verified ? h('span', { title: 'Verified on X' }, '✓') : null,
-        h('a', { class: 'muted', href: 'https://x.com/' + p.handle, target: '_blank', rel: 'noopener noreferrer' }, '@' + p.handle),
+        h('a', { class: 'muted', href: NET[net].profile(p.handle), target: '_blank', rel: 'noopener noreferrer' }, '@' + p.handle),
         h('span', { class: 'muted', title: new Date(p.created_at).toLocaleString() }, '· ' + ago(p.created_at)),
-        p.grp === 'lab' ? p2('AI lab', 'src-lab') : null),
-      h('p', { class: 'xtext' }, xRich(p.text || '')),
-      (p.media || []).length ? h('div', { class: 'xmedia' }, p.media.map(m => safeUrl(m.url) ? h('a', { href: url || m.url, target: '_blank', rel: 'noopener noreferrer' },
-        h('img', { src: m.url, alt: m.type === 'video' ? 'Video preview' : 'Image', loading: 'lazy', referrerpolicy: 'no-referrer', onerror: e => e.target.closest('a').remove() })) : null)) : null,
+        p2(net === 'x' ? '𝕏' : '🦋 Bluesky', 'spec', 'Posted on ' + NET[net].label),
+        p.grp === 'lab' ? p2('AI lab', 'src-lab') : p.grp === 'press' ? p2('Reporter', '') : null),
+      h('p', { class: 'xtext' }, xRich(p.text || '', net)),
+      (p.media || []).length ? h('div', { class: 'xmedia' }, p.media.map(m => safeUrl(m.url) ? h('a', { href: (m.type === 'link' && (p.links || [])[0]) || url || m.url, target: '_blank', rel: 'noopener noreferrer' },
+        h('img', { src: m.url, alt: m.type === 'video' ? 'Video preview' : m.type === 'link' ? 'Link preview' : 'Image', loading: 'lazy', referrerpolicy: 'no-referrer', onerror: e => e.target.closest('a').remove() })) : null)) : null,
       h('div', { class: 'xfoot' }, stat(p.likes, '♥', 'Likes'), stat(p.reposts, '↻', 'Reposts'), stat(p.replies, '💬', 'Replies'), stat(p.views, '👁', 'Views'),
-        url ? h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, 'Open on X ↗') : null)));
+        url ? h('a', { href: url, target: '_blank', rel: 'noopener noreferrer' }, NET[net].open + ' ↗') : null)));
+}
+
+/* --- Live layer (website): this page itself checks Bluesky and Hacker News every minute (both allow it from a
+   browser), so the newest posts and stories appear without waiting for the next website update. --- */
+const LIVE_AI = /\b(ai|a\.i\.|llms?|gpt\S*|chatgpt|openai|anthropic|claude|gemini|deepmind|llama|mistral|qwen|deepseek|agents?|agentic|transformers?|inference|neural|machine learning|diffusion|copilot|cursor|mcp|rag|embeddings?|fine-?tun\w*|nvidia|hugging ?face|grok|kimi|glm|reasoning model|language models?)\b/i;
+const bskyLive = { i: 0, timer: null, at: null };
+function bskyFromApi(f, group) {
+  const p = f.post || {}, rec = p.record || {}, a = p.author || {};
+  if (f.reason || f.reply || rec.reply || !String(p.uri || '').startsWith('at://') || !a.handle) return null;
+  const emb = p.embed || {}, ext = emb.external || (emb.media || {}).external || {};
+  let text = rec.text || '';
+  const links = [];
+  (rec.facets || []).forEach(fc => (fc.features || []).forEach(ft => { if (/^https?:\/\//.test(ft.uri || '') && !links.includes(ft.uri)) links.push(ft.uri); }));
+  if (ext.uri && !links.includes(ext.uri)) { links.push(ext.uri); if (ext.title && !text.includes(ext.uri)) text = text ? `${text}\n\n${ext.title}` : ext.title; }
+  const media = [...(emb.images || []), ...((emb.media || {}).images || [])].map(im => ({ url: im.thumb || im.fullsize, type: 'photo' })).filter(m => m.url);
+  if (!media.length && ext.thumb) media.push({ url: ext.thumb, type: 'link' });
+  if ((!text.trim() && !media.length) || (group === 'press' && !LIVE_AI.test(text))) return null;
+  const created = rec.createdAt || p.indexedAt;
+  if (!created || Date.now() - Date.parse(created) > 7 * 86400000) return null;
+  return { id: 'bsky:' + p.uri, network: 'bsky', handle: a.handle, name: a.displayName || a.handle, avatar: a.avatar, verified: false,
+    text: text.trim(), url: `https://bsky.app/profile/${a.handle}/post/${p.uri.split('/').pop()}`, created_at: new Date(created).toISOString(),
+    likes: p.likeCount, reposts: p.repostCount, replies: p.replyCount, quotes: p.quoteCount, views: null, media: media.slice(0, 4), links: links.slice(0, 4), grp: group };
+}
+async function liveBskyTick() {
+  clearTimeout(bskyLive.timer);
+  const X = D && D.x;
+  if (STATIC && X && !document.hidden && $('#xList')) {
+    const accts = X.bsky_accounts || [];
+    const batch = accts.slice(bskyLive.i, bskyLive.i + 7);   // 7 accounts a minute: each one every ~3 minutes
+    bskyLive.i = accts.length ? (bskyLive.i + 7) % accts.length : 0;
+    const res = await Promise.allSettled(batch.map(a => fetch(`https://public.api.bsky.app/xrpc/app.bsky.feed.getAuthorFeed?actor=${encodeURIComponent(a.handle)}&limit=20&filter=posts_no_replies`)
+      .then(r => r.ok ? r.json() : null).then(j => [a, j])));
+    const have = new Set((X.items || []).map(p => p.id));
+    let added = 0;
+    res.forEach(r => {
+      if (r.status !== 'fulfilled' || !r.value[1]) return;
+      const [a, j] = r.value;
+      (j.feed || []).forEach(f => { const p = bskyFromApi(f, a.group); if (p && !have.has(p.id)) { (X.items = X.items || []).push(p); have.add(p.id); added++; } });
+    });
+    if (res.some(r => r.status === 'fulfilled' && r.value[1])) bskyLive.at = nowIso();
+    if (added) { X.items.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || '')); X.total = X.items.length; }
+    if (added && window.scrollY < 300) loadX(true); else drawX();
+  }
+  bskyLive.timer = setTimeout(liveBskyTick, 60000);
+}
+async function liveHN() {
+  const since = Math.floor(Date.now() / 1000) - 3 * 3600;
+  const r = await fetch(`https://hn.algolia.com/api/v1/search_by_date?tags=story&hitsPerPage=100&numericFilters=created_at_i>${since},points>=5`);
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return ((await r.json()).hits || []).filter(x => x.title && LIVE_AI.test(x.title)).map(x => {
+    const hn = `https://news.ycombinator.com/item?id=${x.objectID}`;
+    return { id: 'hn:' + x.objectID, title: x.title, url: x.url || hn, source_name: 'Hacker News', kind: 'discussion', published: x.created_at,
+      metrics: { points: x.points, comments: x.num_comments, hn_url: hn } };
+  });
+}
+const liveFeed = { timer: null, at: null, failed: false };
+const LIVE_HOURS = 3;
+async function liveNewsTick() {
+  clearTimeout(liveFeed.timer);
+  if (!document.hidden && $('#liveBox')) {
+    const cutoff = Date.now() - LIVE_HOURS * 3600000, when = it => Date.parse(it.published || it.first_seen) || 0;
+    let items = [];
+    try {
+      if (STATIC) {
+        items = sIdx().leads.filter(it => when(it) > cutoff && it.kind !== 'model');
+        try { items = items.concat(await liveHN()); liveFeed.failed = false; } catch (e) { liveFeed.failed = true; }
+      } else {
+        const r = await api('/api/news?' + new URLSearchParams({ sort: 'latest', fresh: '1', limit: 40 }));
+        items = r.items.filter(it => when(it) > cutoff && it.kind !== 'model');
+      }
+      liveFeed.at = nowIso();
+    } catch (e) { liveFeed.failed = true; }
+    const key = it => String(it.url || it.id).replace(/[?#].*$/, '').replace(/\/$/, '').replace('://www.', '://');
+    const seen = new Set();
+    items = items.filter(it => it.kind !== 'discussion' || !items.some(o => o !== it && o.kind !== 'discussion' && key(o) === key(it)))
+      .filter(it => !seen.has(key(it)) && seen.add(key(it))).sort((a, b) => when(b) - when(a)).slice(0, 12);
+    drawLive(items);
+  }
+  liveFeed.timer = setTimeout(liveNewsTick, 60000);
+}
+function drawLive(items) {
+  const box = $('#liveBox'); if (!box) return;
+  const row = it => {
+    const m = it.metrics || {}, u = safeUrl(it.url);
+    return h('li', null, h('span', { class: 'lt', title: new Date(it.published || it.first_seen).toLocaleString() }, ago(it.published || it.first_seen)),
+      h('span', { class: 'ls' }, it.source_name),
+      u ? h('a', { href: u, target: '_blank', rel: 'noopener noreferrer', onclick: () => it.related !== undefined && markSeen(it) }, it.title) : h('span', null, it.title),
+      m.points ? (safeUrl(m.hn_url) ? h('a', { class: 'lp', href: m.hn_url, target: '_blank', rel: 'noopener noreferrer' }, `▲${compact(m.points)} · ${compact(m.comments || 0)}💬`) : h('span', { class: 'lp' }, `▲${compact(m.points)}`)) : null);
+  };
+  const shown = items.slice(0, 5), rest = items.slice(5);
+  box.replaceChildren(h('section', { class: 'livebox' },
+    h('div', { class: 'live-h' }, h('h2', null, h('span', { class: 'pulse' }), 'Live: last 3 hours'),
+      h('span', { class: 'muted small' }, (liveFeed.at ? `checked ${ago(liveFeed.at)} · ` : '') + (STATIC ? 'this page checks Hacker News every minute; everything else updates every 5 minutes' : 'Hacker News, Bluesky and X every minute; news feeds every 3 minutes') + (liveFeed.failed ? ' · Hacker News could not be reached' : ''))),
+    items.length ? h('ul', null, shown.map(row)) : h('p', { class: 'muted small', style: { margin: '6px 0 0' } }, 'Nothing new in the last 3 hours yet.'),
+    rest.length ? h('details', null, h('summary', null, `${rest.length} more`), h('ul', null, rest.map(row))) : null));
 }
 function xSetupCard(r) {
   const prov = r.providers || {}, cap = r.cap || 100;
@@ -2061,7 +2199,7 @@ function xSetupCard(r) {
     h('p', { class: 'small', style: { margin: '10px 0 0' } }, h('b', null, 'Where to put the key')),
     h('ol', { class: 'small' },
       h('li', null, 'Website (phone and computer): GitHub → your repository → Settings → Secrets and variables → Actions → ', h('b', null, 'New repository secret'), ' named ', h('code', null, 'X_API_KEY'),
-        '. For twitterapi.io also add, on the Variables tab, ', h('code', null, 'X_API_PROVIDER'), ' = ', h('code', null, 'twitterapi'), '. Posts appear here within about 10 minutes, and the desktop app then shows them too without a key of its own.',
+        '. For twitterapi.io also add, on the Variables tab, ', h('code', null, 'X_API_PROVIDER'), ' = ', h('code', null, 'twitterapi'), '. Posts appear here within about 5 minutes, and the desktop app then shows them too without a key of its own.',
         repo ? [' ', ext('Open the secrets page', `https://github.com/${repo}/settings/secrets/actions`)] : null),
       STATIC ? null : h('li', null, 'Or only on this computer: ', h('a', { href: '#/settings' }, 'Settings → X (Twitter)'), '.')));
 }
@@ -3258,7 +3396,7 @@ function renderSiteSettings(ctx) {
   } }, 'Erase this browser\'s data');
   const u = siteActionsUrl();
   main.append(h('header', { class: 'view-head' }, h('div', null, h('h1', null, 'Settings'),
-    h('p', { class: 'sub' }, 'This is the website version. News, papers and repos are rebuilt by GitHub Actions about every 10 minutes and appear here by themselves. Your review progress, read marks, Gemini breakdowns and your Gemini key are saved in this browser only (your phone and your computer each keep their own).'))),
+    h('p', { class: 'sub' }, 'This is the website version. News, papers and repos are rebuilt by GitHub Actions about every 5 minutes and appear here by themselves. Your review progress, read marks, Gemini breakdowns and your Gemini key are saved in this browser only (your phone and your computer each keep their own).'))),
   h('div', { class: 'set-grid' },
     h('section', { class: 'card' }, h('h2', { style: { marginBottom: '14px' } }, 'Gemini'),
       h('div', { class: 'field' }, h('label', null, 'API key'),
@@ -3282,7 +3420,7 @@ function renderSiteSettings(ctx) {
     h('section', { class: 'card' }, h('h2', { style: { marginBottom: '8px' } }, 'Website data'),
       h('p', { class: 'small', style: { margin: '0 0 8px' } }, `Last update: ${ago(D.generated_at)} (${new Date(D.generated_at).toLocaleString()}). ${D.news.length} news events, ${D.papers.length} papers, ${(D.repos.tracked || []).length + (D.repos.new || []).length} repos.`),
       h('div', { class: 'feedlist' }, D.sources.map(s => h('span', { title: s.message || '' }, h('span', { class: 'dot ' + (s.status || 'never') }), `${s.label || s.name}: ${s.last_success ? ago(s.last_success) : 'never'}`))),
-      h('p', { class: 'small muted' }, 'GitHub Actions rebuilds the website about every 10 minutes, and open pages load each update by themselves. ', u ? ['If it falls behind: ', h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, 'Update website ↗'), ' → Run workflow.'] : ''),
+      h('p', { class: 'small muted' }, 'GitHub Actions rebuilds the website about every 5 minutes, and open pages load each update by themselves. ', u ? ['If it falls behind: ', h('a', { href: u, target: '_blank', rel: 'noopener noreferrer' }, 'Update website ↗'), ' → Run workflow.'] : ''),
       h('p', { class: 'small muted', style: { marginBottom: 0 } }, 'Optional: add your Gemini key as a repository secret named GEMINI_API_KEY (GitHub → Settings → Secrets and variables → Actions) and about every 4 hours an update also writes the Frontier Brief, triages the top stories and breaks down 2 top papers for everyone who opens the site.')),
     D.x && D.x.configured
       ? h('section', { class: 'card' }, h('h2', { style: { marginBottom: '8px' } }, 'X (Twitter)'),

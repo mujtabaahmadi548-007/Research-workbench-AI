@@ -1,11 +1,12 @@
-# Keeps the website (GitHub Pages) live: fetches the sources and republishes about every 10 minutes.
+# Keeps the website (GitHub Pages) live: fetches the sources and republishes about every 5 minutes. Open pages
+# also check Hacker News and Bluesky themselves every minute (index.html, "Live layer").
 # One-time setup: GitHub -> Settings -> Pages -> "Build and deployment" -> Source: GitHub Actions.
 # Optional: a repository secret GEMINI_API_KEY makes an update (at most every 4 hours, to protect the free quota)
 # also write the Frontier Brief, triage the top stories and break down 2 top papers. Without it the site still
 # works; you can add your key in the site's Settings.
 #
 # Why a chain: GitHub delays and drops cron schedules (the old "every 4 hours" schedule really ran every 6-10
-# hours). So each run publishes the site and then starts the next run itself, 10 minutes after it began. The hourly
+# hours). So each run publishes the site and then starts the next run itself, 5 minutes after it began. The hourly
 # schedule is only a backup that restarts the chain if it ever breaks; the concurrency group keeps it to one run
 # at a time. Actions minutes are free for public repositories.
 name: Update website
@@ -78,7 +79,7 @@ jobs:
           WORKBENCH_X_DAILY_CAP: ${{ vars.X_DAILY_CAP }}
           WORKBENCH_X_ACCOUNTS: ${{ vars.X_ACCOUNTS }}
           REFRESH: ${{ (github.event_name != 'workflow_dispatch' || inputs.refresh) && '--refresh' || '' }}
-        run: python build_site.py --db ci-data/workbench.db --save-db ci-data/workbench.db --site site --alerts alerts/state.json --figures 2 --gemini-every 4 $REFRESH
+        run: python build_site.py --db ci-data/workbench.db --save-db ci-data/workbench.db --site site --alerts alerts/state.json --figures 1 --gemini-every 4 $REFRESH
 
       - uses: actions/cache/save@v4
         if: always()
@@ -102,7 +103,7 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@v4
 
-  # Starts the next update 10 minutes after this one began (30 minutes after a failed one, so a broken build
+  # Starts the next update 5 minutes after this one began (30 minutes after a failed one, so a broken build
   # cannot spin). Runs even when the build or the deploy failed, so one bad run never stops the updates.
   #
   # It also keeps the whole setup alive for the long run:
@@ -128,7 +129,7 @@ jobs:
           set +e
           R="$GITHUB_REPOSITORY"
           now=$(date +%s)
-          interval=600
+          interval=300
           [ "$OK" = "true" ] || interval=1800
           wait=$(( interval - (now - ${T0:-$now}) ))
           if [ "$wait" -gt 0 ]; then echo "Next update in $wait s."; sleep "$wait"; fi

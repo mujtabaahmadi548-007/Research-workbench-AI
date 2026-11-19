@@ -362,7 +362,7 @@ CREATE INDEX IF NOT EXISTS idx_xposts_created ON xposts(created_at);
 SOURCE_NAMES = {
     "huggingface": "Hugging Face Daily Papers", "arxiv": "arXiv (cs.AI, cs.CL, cs.LG)", "github": "GitHub releases & repos",
     "news": "AI news feeds", "models": "Hugging Face trending models", "hn": "Hacker News (AI stories)",
-    "x": "X (Twitter) posts",
+    "x": "X (Twitter) posts", "bsky": "Bluesky posts",
 }
 PAPER_SOURCES = ["huggingface", "arxiv", "github"]
 NEWS_SOURCES = ["news", "models", "hn"]
@@ -395,12 +395,15 @@ NEWS_EXTRA_COLUMNS = {
     "seen_at": "TEXT",
 }
 QUESTION_EXTRA_COLUMNS = {"news_id": "TEXT"}
+NEWS_SOURCES_EXTRA_COLUMNS = {"etag": "TEXT", "last_modified": "TEXT"}   # conditional GET (feeds are polled often)
+XPOSTS_EXTRA_COLUMNS = {"network": "TEXT NOT NULL DEFAULT 'x'"}          # 'x' or 'bsky'
 SCORE_VERSION = "2"
 
 
 def migrate(c: sqlite3.Connection) -> None:
     for table, cols in (("papers", PAPER_EXTRA_COLUMNS), ("repos", REPO_EXTRA_COLUMNS), ("news", NEWS_EXTRA_COLUMNS),
-                        ("questions", QUESTION_EXTRA_COLUMNS)):
+                        ("questions", QUESTION_EXTRA_COLUMNS), ("news_sources", NEWS_SOURCES_EXTRA_COLUMNS),
+                        ("xposts", XPOSTS_EXTRA_COLUMNS)):
         have = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
         for name, decl in cols.items():
             if name not in have:
@@ -1553,7 +1556,48 @@ NEWS_FEEDS: list[tuple[str, str, str, str]] = [
     ("raschka", "Ahead of AI (Raschka)", "https://magazine.sebastianraschka.com/feed", "analysis"),
     ("mollick", "One Useful Thing (Mollick)", "https://www.oneusefulthing.org/feed", "analysis"),
     ("lastweekinai", "Last Week in AI", "https://lastweekin.ai/feed", "analysis"),
-]
+    # Added 2026-11-19 (all checked fresh): companies and research groups
+    ("ms_ai", "Microsoft (AI news)", "https://news.microsoft.com/source/topics/ai/feed/", "lab"),
+    ("ms_foundry", "Microsoft Foundry (Azure AI)", "https://devblogs.microsoft.com/foundry/feed/", "lab"),
+    ("gcloud_ai", "Google Cloud AI & ML", "https://cloudblog.withgoogle.com/products/ai-machine-learning/rss/", "lab"),
+    ("meta_eng", "Meta Engineering", "https://engineering.fb.com/feed/", "lab"),
+    ("amazon_science", "Amazon Science", "https://www.amazon.science/index.rss", "lab"),
+    ("salesforce_ai", "Salesforce AI Research", "https://www.salesforce.com/blog/category/ai-research/feed/", "lab"),
+    ("databricks", "Databricks", "https://www.databricks.com/feed", "lab"),
+    ("metr", "METR (AI evaluations)", "https://metr.org/feed.xml", "lab"),
+    # press
+    ("techmeme", "Techmeme", "https://www.techmeme.com/feed.xml", "press"),
+    ("nyt_ai", "New York Times AI", "https://www.nytimes.com/svc/collections/v1/publish/https://www.nytimes.com/spotlight/artificial-intelligence/rss.xml", "press"),
+    ("guardian_ai", "The Guardian AI", "https://www.theguardian.com/technology/artificialintelligenceai/rss", "press"),
+    ("zdnet_ai", "ZDNet AI", "https://www.zdnet.com/topic/artificial-intelligence/rss.xml", "press"),
+    ("siliconangle", "SiliconANGLE AI", "https://siliconangle.com/category/ai/feed/", "press"),
+    ("infoq_ai", "InfoQ AI & ML", "https://feed.infoq.com/ai-ml-data-eng/", "press"),
+    ("newstack_ai", "The New Stack AI", "https://thenewstack.io/ai/feed/", "press"),
+    ("media404", "404 Media", "https://www.404media.co/rss/", "press"),
+    # newsletters, research blogs and podcasts
+    ("epoch", "Epoch AI (Gradient Updates)", "https://epochai.substack.com/feed", "analysis"),
+    ("tldr_ai", "TLDR AI", "https://tldr.tech/api/rss/ai", "analysis"),
+    ("bensbites", "Ben's Bites", "https://www.bensbites.com/feed", "analysis"),
+    ("understandingai", "Understanding AI", "https://www.understandingai.org/feed", "analysis"),
+    ("normaltech", "AI as Normal Technology", "https://www.normaltech.ai/feed", "analysis"),
+    ("dwarkesh", "Dwarkesh Podcast", "https://www.dwarkesh.com/feed", "analysis"),
+    ("expview", "Exponential View", "https://www.exponentialview.co/feed", "analysis"),
+    ("garymarcus", "Gary Marcus", "https://garymarcus.substack.com/feed", "analysis"),
+    ("algobridge", "The Algorithmic Bridge", "https://www.thealgorithmicbridge.com/feed", "analysis"),
+    ("platformer", "Platformer", "https://www.platformer.news/rss/", "analysis"),
+    ("chinai", "ChinAI", "https://chinai.substack.com/feed", "analysis"),
+    ("stateofai", "State of AI (Benaich)", "https://nathanbenaich.substack.com/feed", "analysis"),
+    ("karpathy", "Andrej Karpathy (blog)", "https://karpathy.bearblog.dev/feed/", "analysis"),
+    ("lilianweng", "Lil'Log (Lilian Weng)", "https://lilianweng.github.io/index.xml", "analysis"),
+    ("hamel", "Hamel Husain", "https://hamel.dev/index.xml", "analysis"),
+    ("eugeneyan", "Eugene Yan", "https://eugeneyan.com/rss/", "analysis"),
+    ("chiphuyen", "Chip Huyen", "https://huyenchip.com/feed.xml", "analysis"),
+    # community
+    ("lobsters_ai", "Lobsters (AI)", "https://lobste.rs/t/ai.rss", "community"),
+]   # Product Hunt was tried and left out: its feed gives bare product names, no news value
+# Feeds that also carry non-AI posts: only items whose title or summary is about AI are kept
+AI_ONLY_FEEDS = {"techmeme", "meta_eng", "amazon_science", "databricks", "zdnet_ai", "media404", "platformer", "expview",
+                 "nvidia", "aws_ml", "github_ai", "ms_ai"}
 NEWS_MAX_AGE = timedelta(days=21)    # ignore feed items older than this
 NEWS_PER_FEED = 25                   # newest items kept per feed per refresh (OpenAI's feed has 1,000+)
 NEWS_KEEP = timedelta(days=60)       # stored items older than this are deleted
@@ -1914,13 +1958,28 @@ def set_news_source(key: str, name: str, url: str, type_: str, status: str, mess
 def _fetch_one_feed(feed: tuple[str, str, str, str]) -> tuple[int, int]:
     key, name, url, type_ = feed
     try:
-        with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True, verify=SSL_CTX, headers={
-                "User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5"}) as cl:
+        with db() as c:   # conditional GET: an unchanged feed answers "304 Not Modified" with no body
+            prev = c.execute("SELECT etag, last_modified, items, url FROM news_sources WHERE key=?", (key,)).fetchone()
+        headers = {"User-Agent": USER_AGENT, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9, */*;q=0.5"}
+        if prev and prev["url"] == url and prev["items"] is not None:
+            if prev["etag"]:
+                headers["If-None-Match"] = prev["etag"]
+            if prev["last_modified"]:
+                headers["If-Modified-Since"] = prev["last_modified"]
+        with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True, verify=SSL_CTX, headers=headers) as cl:
             r = cl.get(url)
+            if r.status_code == 304:
+                set_news_source(key, name, url, type_, "ok", f"{prev['items']} recent items (no change)", prev["items"])
+                return prev["items"] or 0, 0
             r.raise_for_status()
+        with db() as c:
+            c.execute("UPDATE news_sources SET etag=?, last_modified=? WHERE key=?",
+                      (r.headers.get("etag"), r.headers.get("last-modified"), key))
         entries = HTML_FEEDS[key](r.text) if key in HTML_FEEDS else parse_feed(r.content)
         cutoff = now_utc() - NEWS_MAX_AGE
         entries = [e for e in entries if e["title"] and e["url"] and str(e["url"]).startswith(("https://", "http://"))]
+        if key in AI_ONLY_FEEDS:
+            entries = [e for e in entries if _AI_TITLE.search(f"{e['title']} {(e.get('summary') or '')[:300]}")]
         entries = _date_undated(key, entries)
         fresh = [e for e in entries if e["published"] is None or (parse_iso(e["published"]) or now_utc()) >= cutoff]
         fresh.sort(key=lambda e: e["published"] or "", reverse=True)
@@ -2936,10 +2995,11 @@ def store_x_posts(posts: list[dict], groups: dict[str, str]) -> int:
                            p.get("avatar"), p.get("name"), grp, p["id"]))
                 continue
             c.execute("""INSERT INTO xposts (id, handle, name, avatar, verified, text, url, created_at, likes, reposts,
-                         replies, quotes, views, media, links, first_seen, grp) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         replies, quotes, views, media, links, first_seen, grp, network) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                       (p["id"], p["handle"], p.get("name"), p.get("avatar"), int(bool(p.get("verified"))), p.get("text") or "",
                        p["url"], p["created_at"], p.get("likes"), p.get("reposts"), p.get("replies"), p.get("quotes"),
-                       p.get("views"), json.dumps(p.get("media") or []), json.dumps(p.get("links") or []), now, grp))
+                       p.get("views"), json.dumps(p.get("media") or []), json.dumps(p.get("links") or []), now, grp,
+                       p.get("network") or "x"))
             new += 1
         c.execute("DELETE FROM xposts WHERE created_at < ?", (iso(now_utc() - timedelta(days=X_KEEP_DAYS)),))
     return new
@@ -3059,7 +3119,7 @@ def fetch_x() -> None:
                     set_setting(skey, str(newest))
         set_setting("xstate_last", iso())
         with db() as c:
-            n = c.execute("SELECT COUNT(*) FROM xposts").fetchone()[0]
+            n = c.execute("SELECT COUNT(*) FROM xposts WHERE network='x'").fetchone()[0]
         msg = f"{new} new post{_s(new)} · {_x_reads_today()}/{cap} read today · {X_PROVIDERS[provider]['label']}"
         set_source("x", "ok", msg, n, success=True)
         log.info("X: %s.", msg)
@@ -3085,21 +3145,156 @@ def sync_site_x() -> None:
         if not j.get("configured"):
             set_source("x", "never", "No X API key yet (here or on the website): see the X page.")
             return
-        posts = [p for p in j.get("items") or [] if isinstance(p, dict) and p.get("id") and p.get("handle") and p.get("url")]
+        posts = [p for p in j.get("items") or [] if isinstance(p, dict) and p.get("id") and p.get("handle") and p.get("url")
+                 and (p.get("network") or "x") == "x"]   # Bluesky is read directly (free)
         new = store_x_posts(posts, {h.lower(): g for h, g in x_accounts()} | {p["handle"].lower(): p.get("grp") or "people" for p in posts})
         with db() as c:
-            n = c.execute("SELECT COUNT(*) FROM xposts").fetchone()[0]
+            n = c.execute("SELECT COUNT(*) FROM xposts WHERE network='x'").fetchone()[0]
         set_source("x", "ok", f"{new} new post{_s(new)} from your website's X feed (it holds the key)", n, success=True)
     except Exception as exc:
         status, msg = describe_http_error(exc)
         set_source("x", status, f"Could not read the website's X feed: {msg}")
 
 
-def x_items(q: str = "", group: str = "all", sort: str = "latest", limit: int = 300, offset: int = 0) -> tuple[list[dict], int]:
+# ---------------------------------------------------------------------------
+# Bluesky: many AI researchers and writers post there, and its public API needs no key and costs nothing.
+# Each account's own feed (getAuthorFeed, replies and reposts left out) is read; press accounts keep AI posts only.
+# Accounts below were checked (2026-11-19) to be the real people/organisations and to have posted in the last three
+# months. Many AI people stopped posting there (e.g. Karpathy's last Bluesky post is from 2023), so they are not listed.
+# ---------------------------------------------------------------------------
+BSKY_API = os.environ.get("WORKBENCH_BSKY_BASE", "https://public.api.bsky.app/xrpc").rstrip("/")
+BSKY_ACCOUNTS_DEFAULT: list[tuple[str, str]] = [
+    ("simonwillison.net", "people"), ("emollick.bsky.social", "people"), ("natolambert.bsky.social", "people"),
+    ("emilymbender.bsky.social", "people"), ("danielvanstrien.bsky.social", "people"), ("hardmaru.bsky.social", "people"),
+    ("melaniemitchell.bsky.social", "people"), ("mmitchell.bsky.social", "people"), ("garymarcus.bsky.social", "people"),
+    ("randomwalker.bsky.social", "people"), ("rao2z.bsky.social", "people"), ("rasbt.bsky.social", "people"),
+    ("hamel.bsky.social", "people"), ("yoavgo.bsky.social", "people"),
+    ("ai2.bsky.social", "lab"), ("epochai.bsky.social", "lab"), ("pytorch.org", "lab"), ("mozilla.ai", "lab"),
+    ("caseynewton.bsky.social", "press"), ("haydenfield.bsky.social", "press"), ("kashhill.bsky.social", "press"),
+]
+_BSKY_HANDLE = re.compile(r"^[a-z0-9][a-z0-9.\-]{1,252}\.[a-z]{2,}$")
+
+
+def bsky_accounts() -> list[tuple[str, str]]:
+    raw = get_setting("bsky_accounts")
+    items = []
+    if raw:
+        try:
+            items = json.loads(raw)
+        except ValueError:
+            items = []
+    out, seen = [], set()
+    for s in items or [f"{h}:{g}" for h, g in BSKY_ACCOUNTS_DEFAULT]:
+        handle, _, group = str(s).strip().lstrip("@").lower().partition(":")
+        if _BSKY_HANDLE.match(handle) and handle not in seen:
+            seen.add(handle)
+            out.append((handle, group if group in ("lab", "people", "press") else "people"))
+    return out[:60]
+
+
+def _bsky_post(item: dict, group: str) -> Optional[dict]:
+    if item.get("reason") or item.get("reply"):          # reposts and replies are left out
+        return None
+    p = item.get("post") or {}
+    rec, a = p.get("record") or {}, p.get("author") or {}
+    uri, handle = p.get("uri") or "", a.get("handle") or ""
+    if not uri.startswith("at://") or not handle or rec.get("reply"):
+        return None
+    text = rec.get("text") or ""
+    links = []
+    for f in rec.get("facets") or []:                     # full links (the text shows them shortened)
+        for feat in f.get("features") or []:
+            u = feat.get("uri")
+            if u and str(u).startswith(("https://", "http://")) and u not in links:
+                links.append(u)
+    emb = p.get("embed") or {}
+    media = [{"url": im.get("thumb") or im.get("fullsize"), "type": "photo"} for im in (emb.get("images") or [])
+             if im.get("thumb") or im.get("fullsize")]
+    media += [{"url": im.get("thumb") or im.get("fullsize"), "type": "photo"}
+              for im in ((emb.get("media") or {}).get("images") or []) if im.get("thumb") or im.get("fullsize")]
+    ext = emb.get("external") or ((emb.get("media") or {}).get("external")) or {}
+    if ext.get("uri") and ext["uri"] not in links:
+        links.append(ext["uri"])
+        if ext.get("title") and ext["uri"] not in text:
+            text = f"{text}\n\n{ext['title']}" if text else ext["title"]
+    if ext.get("thumb") and not media:
+        media.append({"url": ext["thumb"], "type": "link"})
+    if not text.strip() and not media:
+        return None
+    if group == "press" and not _AI_TITLE.search(text):
+        return None
+    for u in links:   # show full links instead of the shortened ones in the text
+        short = re.sub(r"^https?://(www\.)?", "", u)
+        if short not in text and len(short) > 30:
+            for frag in re.findall(r"\S+\.\.\.|\S+…", text):
+                if short.startswith(frag.rstrip(".…")):
+                    text = text.replace(frag, u)
+    rkey = uri.rsplit("/", 1)[-1]
+    return {"id": "bsky:" + uri, "network": "bsky", "handle": handle, "name": a.get("displayName") or handle,
+            "avatar": a.get("avatar"), "verified": False, "text": text.strip(),
+            "url": f"https://bsky.app/profile/{handle}/post/{rkey}",
+            "created_at": norm_date(rec.get("createdAt") or p.get("indexedAt")) or iso(),
+            "likes": p.get("likeCount"), "reposts": p.get("repostCount"), "replies": p.get("replyCount"),
+            "quotes": p.get("quoteCount"), "views": None, "media": media[:4], "links": links[:4]}
+
+
+def fetch_bsky() -> None:
+    accounts = bsky_accounts()
+    if not accounts:
+        set_source("bsky", "never", "No Bluesky accounts selected.")
+        return
+    set_source("bsky", "running", f"Reading {len(accounts)} Bluesky accounts...")
+    posts, failed = [], []
+    cutoff = now_utc() - timedelta(days=X_KEEP_DAYS)
+
+    def one(acct: tuple[str, str]) -> list[dict]:
+        handle, group = acct
+        with httpx.Client(timeout=HTTP_TIMEOUT, verify=SSL_CTX, headers={"User-Agent": USER_AGENT}) as cl:
+            r = cl.get(BSKY_API + "/app.bsky.feed.getAuthorFeed",
+                       params={"actor": handle, "limit": 40, "filter": "posts_no_replies"})   # reposts use up slots
+            r.raise_for_status()
+        out = []
+        for it in r.json().get("feed") or []:
+            p = _bsky_post(it, group)
+            if p and (parse_iso(p["created_at"]) or now_utc()) >= cutoff:
+                p["grp"] = group
+                out.append(p)
+        return out
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for acct, res in zip(accounts, ex.map(lambda a: _safe(one, a), accounts)):
+            if res is None:
+                failed.append(acct[0])
+            else:
+                posts += res
+    groups = {h: g for h, g in accounts}
+    new = store_x_posts(posts, groups)
+    with db() as c:
+        n = c.execute("SELECT COUNT(*) FROM xposts WHERE network='bsky'").fetchone()[0]
+    ok = len(accounts) - len(failed)
+    msg = f"{new} new post{_s(new)} · {ok}/{len(accounts)} accounts read" + (f"; failed: {', '.join(failed[:3])}" if failed else "")
+    set_source("bsky", "ok" if ok and not failed else "partial" if ok else "offline", msg, n, success=bool(ok))
+    if new:
+        log.info("Bluesky: %s.", msg)
+
+
+def _safe(fn, *args):
+    try:
+        return fn(*args)
+    except Exception as exc:
+        log.debug("%s failed: %s", getattr(fn, "__name__", "call"), exc)
+        return None
+
+
+def x_items(q: str = "", group: str = "all", sort: str = "latest", limit: int = 300, offset: int = 0,
+            network: str = "all") -> tuple[list[dict], int]:
     where, params = [], []
-    if group in ("lab", "people"):
+    if group in ("lab", "people", "press"):
         where.append("grp = ?")
         params.append(group)
+    if network in ("x", "bsky"):
+        where.append("network = ?")
+        params.append(network)
     for tok in re.findall(r"[\w@#.+-]+", q.lower())[:8]:
         where.append("(lower(text) LIKE ? OR lower(handle) LIKE ? OR lower(name) LIKE ?)")
         params += [f"%{tok.lstrip('@')}%"] * 3
@@ -3120,6 +3315,7 @@ def x_info() -> dict:
     cfg = x_config()
     p = X_PROVIDERS[cfg["provider"]]
     return {"configured": bool(cfg["key"]), "provider": cfg["provider"], "provider_label": p["label"],
+            "bsky_accounts": [{"handle": h, "group": g} for h, g in bsky_accounts()],
             "per_post": p["per_post"], "cap": cfg["cap"], "reads_today": _x_reads_today(),
             "max_month_usd": round(cfg["cap"] * 30 * p["per_post"], 2),
             "accounts": [{"handle": h, "group": g} for h, g in cfg["accounts"]],
@@ -3169,6 +3365,8 @@ def start_refresh(trigger: str, sources: Optional[list[str]] = None, force: bool
                     start_brief_regen()  # rewrite Today's Frontier Brief in the background for the new items
             if "x" in wanted:
                 fetch_x()
+            if "bsky" in wanted:
+                fetch_bsky()
         except Exception:
             log.exception("Refresh hit an unexpected error (the app keeps running).")
         finally:
@@ -3180,21 +3378,25 @@ def start_refresh(trigger: str, sources: Optional[list[str]] = None, force: bool
     return True
 
 
-AUTO_REFRESH_MINUTES = int(os.environ.get("WORKBENCH_AUTO_REFRESH_MIN", "10"))
-AUTO_FULL_REFRESH_MINUTES = 30   # papers and GitHub change slowly (and GitHub allows 60 requests/hour without a token)
+AUTO_REFRESH_MINUTES = float(os.environ.get("WORKBENCH_AUTO_REFRESH_MIN", "1"))   # one tick
+# How often each source is read while the app is open, in ticks (minutes). The fast, cheap ones every minute; the
+# news feeds every 3 minutes (conditional requests: an unchanged feed costs a tiny "304 Not Modified");
+# papers and GitHub every 30 minutes (GitHub allows 60 requests/hour without a token).
+AUTO_SCHEDULE = {"hn": 1, "bsky": 1, "x": 1, "news": 3, "models": 10}
+AUTO_FULL_REFRESH_MINUTES = 30
 BRIEF_MIN_AGE_HOURS = 2   # a stale Frontier Brief is rewritten automatically at most this often
 
 
 def auto_refresh_loop() -> None:
-    """Keeps the app live while it stays open: news feeds, trending models and Hacker News every
-    AUTO_REFRESH_MINUTES, and everything (plus arXiv, Hugging Face papers, GitHub) every 30 minutes."""
+    """Keeps the app live while it stays open (see AUTO_SCHEDULE); everything else every 30 minutes."""
     full_every = max(1, round(AUTO_FULL_REFRESH_MINUTES / AUTO_REFRESH_MINUTES))
     n = 0
     while not _stop.wait(AUTO_REFRESH_MINUTES * 60):
         n += 1
         full = n % full_every == 0
-        if start_refresh("auto", None if full else [*NEWS_SOURCES, "x"]):
-            log.info("Auto-refresh: fetching %s (every %d min).", "all sources" if full else "news, models and Hacker News", AUTO_REFRESH_MINUTES)
+        due = None if full else [s for s, every in AUTO_SCHEDULE.items() if n % every == 0]
+        if start_refresh("auto", due):
+            (log.info if full else log.debug)("Auto-refresh: %s.", "all sources" if full else ", ".join(due))
 
 
 # ---------------------------------------------------------------------------
@@ -4794,7 +4996,8 @@ async def lifespan(_: FastAPI):
         log.info("  Startup fetch is off; use the Refresh button.")
     if not NO_STARTUP_FETCH and AUTO_REFRESH_MINUTES > 0:
         threading.Thread(target=auto_refresh_loop, name="auto-refresh", daemon=True).start()
-        log.info("  Auto-refresh every %d minutes while the app is open.", AUTO_REFRESH_MINUTES)
+        log.info("  Live updates while the app is open: Hacker News, Bluesky and X every minute, %d news feeds every "
+                 "3 minutes, Hugging Face models every 10, everything else every 30.", len(news_feed_list()))
     _worker_wake.set()
     yield
     _stop.set()
@@ -4881,7 +5084,7 @@ def status():
 
 
 class RefreshIn(BaseModel):
-    sources: Optional[list[Literal["huggingface", "arxiv", "github", "news", "models", "hn", "x"]]] = None
+    sources: Optional[list[Literal["huggingface", "arxiv", "github", "news", "models", "hn", "x", "bsky"]]] = None
 
 
 @app.post("/api/refresh")
@@ -4987,13 +5190,14 @@ def list_news(q: str = "", category: str = "all", kind: str = "all", sort: str =
 
 
 @app.get("/api/x")
-def list_x(q: str = "", group: str = "all", sort: str = "latest", limit: int = 60, offset: int = 0):
+def list_x(q: str = "", group: str = "all", sort: str = "latest", limit: int = 60, offset: int = 0, network: str = "all"):
     limit, offset = max(1, min(limit, 200)), max(0, offset)
-    items, total = x_items(q, group, sort, limit, offset)
+    items, total = x_items(q, group, sort, limit, offset, network)
     with db() as c:
         src = c.execute("SELECT * FROM sources WHERE name='x'").fetchone()
+        bsrc = c.execute("SELECT * FROM sources WHERE name='bsky'").fetchone()
     return {"items": items, "total": total, "more": offset + len(items) < total, **x_info(),
-            "source": dict(src) if src else None, "site_url": SITE_URL}
+            "source": dict(src) if src else None, "bsky_source": dict(bsrc) if bsrc else None, "site_url": SITE_URL}
 
 
 @app.post("/api/news/visit")
