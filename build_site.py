@@ -69,10 +69,14 @@ def main() -> int:
     tmp = Path(tempfile.mkdtemp(prefix="wb-site-"))
     work = tmp / "work.db"
     src = Path(args.db).resolve()
-    if src.exists():
+    recover = None
+    if src.exists() and src.stat().st_size > 100_000:
         copy_database(src, work)
     else:
-        print(f"No database at {src} yet: starting a fresh one.")
+        print(f"No database at {src}: starting a fresh one.")
+        repo = os.environ.get("GITHUB_REPOSITORY", "")
+        recover = os.environ.get("WORKBENCH_RECOVER_URL") or (
+            f"https://{repo.split('/')[0].lower()}.github.io/{repo.split('/')[1]}/" if "/" in repo else None)
 
     key = os.environ.get("WORKBENCH_GEMINI_KEY", "").strip()
     os.environ["WORKBENCH_DB"] = str(work)
@@ -85,6 +89,8 @@ def main() -> int:
     import server as S   # noqa: E402  (after the environment is set)
 
     S.init_db()
+    if recover:
+        recover_from_site(S, recover)
     S.seed_starter()
     S.backfill_scores()
     # Highest alerts (new Claude/Gemini/GPT models, breakthroughs) also go on the News page
@@ -137,6 +143,43 @@ def main() -> int:
         print(f"Saved the database to {dst}.")
     shutil.rmtree(tmp, ignore_errors=True)
     return 0
+
+
+def recover_from_site(S, url: str) -> None:
+    """The cached database is gone (a GitHub cache miss): rebuild the news history and the X/Bluesky posts from the
+    published website, keeping their original first-seen times, so nothing already shown disappears or looks new."""
+    import httpx
+    try:
+        r = httpx.get(url.rstrip("/") + "/data.js", params={"t": int(time.time())}, timeout=90, follow_redirects=True,
+                      verify=S.SSL_CTX, headers={"User-Agent": S.USER_AGENT})
+        r.raise_for_status()
+        text = r.text.strip()
+        data = json.loads(text[text.index("{"):text.rindex("}") + 1])
+    except Exception as exc:
+        print(f"Recovery: could not read {url} ({type(exc).__name__}); starting empty.")
+        return
+    n = 0
+    with S.db() as c:
+        for lead in data.get("news") or []:
+            for it in [lead, *(lead.get("related") or [])]:
+                if not it.get("id") or not it.get("title") or not str(it.get("url") or "").startswith(("https://", "http://")):
+                    continue
+                rec = {"id": it["id"], "kind": it.get("kind") or "article",
+                       "source": it.get("source") or ("hn" if it.get("source_name") == "Hacker News" else
+                                                      (it.get("source_name") or "site").lower().replace(" ", "_")),
+                       "source_name": it.get("source_name") or "News", "source_type": it.get("source_type") or "press",
+                       "title": it["title"], "url": it["url"], "summary": it.get("summary") or "", "image": it.get("image"),
+                       "author": it.get("author"), "published": it.get("published"), "updated_at": it.get("updated_at"),
+                       "categories": it.get("categories") or None, "metrics": it.get("metrics") or {}, "specs": it.get("specs") or {}}
+                S.upsert_news(c, rec)
+                c.execute("UPDATE news SET first_seen=? WHERE id=?", (it.get("first_seen") or it.get("published") or S.iso(), it["id"]))
+                n += 1
+    posts = [p for p in ((data.get("x") or {}).get("items") or []) if p.get("id") and p.get("handle") and p.get("url")]
+    S.store_x_posts(posts, {})
+    with S.db() as c:
+        for p in posts:
+            c.execute("UPDATE xposts SET first_seen=? WHERE id=?", (p.get("first_seen") or p.get("created_at"), p["id"]))
+    print(f"Recovery: restored {n} news items and {len(posts)} posts from {url}.")
 
 
 def fetch_figures(S, n: int) -> None:
@@ -235,8 +278,10 @@ def _run_gemini_steps(S, n_analyze: int) -> None:
 
 
 def build_snapshot(S, max_papers: int) -> dict:
+    _, cutoff = S.window_cutoff(S.NEWS_WINDOW_HOURS)   # the website only carries news from the last 14 days
     with S.db() as c:
-        rows = c.execute("SELECT * FROM news ORDER BY COALESCE(trend_score, 0) DESC, COALESCE(published, first_seen) DESC").fetchall()
+        rows = c.execute("SELECT * FROM news WHERE COALESCE(published, first_seen) >= ? "
+                         "ORDER BY COALESCE(trend_score, 0) DESC, COALESCE(published, first_seen) DESC", (cutoff,)).fetchall()
         raw = {r["id"]: dict(r) for r in rows}
         news_total = len(rows)
     groups = S.group_stories([S._news_out(r) for r in rows])

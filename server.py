@@ -396,7 +396,8 @@ NEWS_EXTRA_COLUMNS = {
 }
 QUESTION_EXTRA_COLUMNS = {"news_id": "TEXT"}
 NEWS_SOURCES_EXTRA_COLUMNS = {"etag": "TEXT", "last_modified": "TEXT"}   # conditional GET (feeds are polled often)
-XPOSTS_EXTRA_COLUMNS = {"network": "TEXT NOT NULL DEFAULT 'x'"}          # 'x' or 'bsky'
+XPOSTS_EXTRA_COLUMNS = {"network": "TEXT NOT NULL DEFAULT 'x'",          # 'x' or 'bsky'
+                        "via": "TEXT"}                                   # X: api | hn | bsky | news | gemini
 SCORE_VERSION = "2"
 
 
@@ -1900,6 +1901,9 @@ def find_arxiv_ids(*texts: Optional[str]) -> list[str]:
 
 def upsert_news(c: sqlite3.Connection, rec: dict) -> bool:
     now = iso()
+    pub = parse_iso(rec.get("published"))
+    if pub and pub > now_utc() + timedelta(hours=1):   # a feed with a wrong (future) date must not pin itself on top
+        rec = {**rec, "published": now}
     cats = rec.get("categories") or classify_news(rec["title"], rec.get("summary", ""), rec["kind"])
     topics = topic_concepts(rec["title"], rec.get("summary", ""))
     row = c.execute("SELECT metrics, specs, arxiv_ids FROM news WHERE id=?", (rec["id"],)).fetchone()
@@ -2995,11 +2999,11 @@ def store_x_posts(posts: list[dict], groups: dict[str, str]) -> int:
                            p.get("avatar"), p.get("name"), grp, p["id"]))
                 continue
             c.execute("""INSERT INTO xposts (id, handle, name, avatar, verified, text, url, created_at, likes, reposts,
-                         replies, quotes, views, media, links, first_seen, grp, network) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                         replies, quotes, views, media, links, first_seen, grp, network, via) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                       (p["id"], p["handle"], p.get("name"), p.get("avatar"), int(bool(p.get("verified"))), p.get("text") or "",
                        p["url"], p["created_at"], p.get("likes"), p.get("reposts"), p.get("replies"), p.get("quotes"),
                        p.get("views"), json.dumps(p.get("media") or []), json.dumps(p.get("links") or []), now, grp,
-                       p.get("network") or "x"))
+                       p.get("network") or "x", p.get("via") or ("api" if (p.get("network") or "x") == "x" else None)))
             new += 1
         c.execute("DELETE FROM xposts WHERE created_at < ?", (iso(now_utc() - timedelta(days=X_KEEP_DAYS)),))
     return new
@@ -3088,21 +3092,36 @@ def _x_fetch_twitterapi(cl: httpx.Client, cfg: dict, query: str, since: Optional
 
 
 def fetch_x() -> None:
+    """X posts from up to three places, each optional: the paid X API (if a key is set), X posts that the news,
+    Hacker News and Bluesky link to (free), and Gemini + Google Search (needs a billing-enabled Gemini key).
+    Posts from the last two are checked against X itself (oEmbed) and stored only if they really exist."""
     cfg = x_config()
-    if not cfg["key"]:
-        if SITE_URL:
-            sync_site_x()
-        else:
-            set_source("x", "never", "No X API key yet: see the X page for how to add one.")
-        return
+    parts: list[str] = []
+    status = "ok"
+    if cfg["key"]:
+        status, msg = _fetch_x_api(cfg)
+        parts.append(msg)
+    elif SITE_URL:   # desktop app: the website does the X work (one place pays / uses the Gemini quota)
+        parts.append(sync_site_x())
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT, verify=SSL_CTX, headers={"User-Agent": BROWSER_UA}) as cl:
+            parts.append(fetch_x_linked(cl))
+            if not SITE_URL:
+                parts.append(fetch_x_gemini(cl))
+    except Exception as exc:
+        parts.append(f"checking posts on X failed ({describe_http_error(exc)[1]})")
+    with db() as c:
+        n = c.execute("SELECT COUNT(*) FROM xposts WHERE network='x'").fetchone()[0]
+    set_source("x", status, " · ".join(p for p in parts if p), n, success=status == "ok")
+
+
+def _fetch_x_api(cfg: dict) -> tuple[str, str]:
     used, cap = _x_reads_today(), cfg["cap"]
     if used >= cap:
-        set_source("x", "rate_limited", f"Daily limit reached ({used}/{cap} posts read today); resumes at 00:00 UTC.")
-        return
+        return "rate_limited", f"X API: daily limit reached ({used}/{cap} posts read today); resumes at 00:00 UTC"
     provider = cfg["provider"]
     groups = {h.lower(): g for h, g in cfg["accounts"]}
     fetcher = _x_fetch_official if provider == "x" else _x_fetch_twitterapi
-    set_source("x", "running", f"Reading {len(cfg['accounts'])} accounts on X...")
     total = new = 0
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT, verify=SSL_CTX, headers={"User-Agent": USER_AGENT}) as cl:
@@ -3114,46 +3133,192 @@ def fetch_x() -> None:
                 posts, newest, billed = fetcher(cl, cfg, q, get_setting(skey), left)
                 total += billed
                 _x_add_reads(billed)
-                new += store_x_posts(posts, groups)
+                new += store_x_posts([{**p, "via": "api"} for p in posts], groups)
                 if newest:
                     set_setting(skey, str(newest))
         set_setting("xstate_last", iso())
-        with db() as c:
-            n = c.execute("SELECT COUNT(*) FROM xposts WHERE network='x'").fetchone()[0]
         msg = f"{new} new post{_s(new)} · {_x_reads_today()}/{cap} read today · {X_PROVIDERS[provider]['label']}"
-        set_source("x", "ok", msg, n, success=True)
         log.info("X: %s.", msg)
+        return "ok", msg
     except XError as exc:
-        set_source("x", exc.status, exc.message)
         log.warning("X: %s", exc.message)
+        return exc.status, exc.message
     except Exception as exc:
         status, msg = describe_http_error(exc)
-        set_source("x", status, f"X: {msg}")
         log.warning("X: %s", msg)
+        return status, f"X API: {msg}"
 
 
-def sync_site_x() -> None:
-    """Desktop app without its own X key: copy the posts the website already read (x.json)."""
+def sync_site_x() -> str:
+    """Desktop app: copy the X posts the website already has (x.json); Bluesky is read directly (free)."""
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True, verify=SSL_CTX, headers={"User-Agent": USER_AGENT}) as cl:
             r = cl.get(SITE_URL.rstrip("/") + "/x.json", params={"t": int(time.time())})
         if r.status_code == 404:
-            set_source("x", "never", "No X API key yet: see the X page for how to add one.")
-            return
+            return ""
         r.raise_for_status()
-        j = r.json()
-        if not j.get("configured"):
-            set_source("x", "never", "No X API key yet (here or on the website): see the X page.")
-            return
-        posts = [p for p in j.get("items") or [] if isinstance(p, dict) and p.get("id") and p.get("handle") and p.get("url")
-                 and (p.get("network") or "x") == "x"]   # Bluesky is read directly (free)
+        posts = [p for p in r.json().get("items") or [] if isinstance(p, dict) and p.get("id") and p.get("handle")
+                 and p.get("url") and (p.get("network") or "x") == "x"]
         new = store_x_posts(posts, {h.lower(): g for h, g in x_accounts()} | {p["handle"].lower(): p.get("grp") or "people" for p in posts})
-        with db() as c:
-            n = c.execute("SELECT COUNT(*) FROM xposts WHERE network='x'").fetchone()[0]
-        set_source("x", "ok", f"{new} new post{_s(new)} from your website's X feed (it holds the key)", n, success=True)
+        return f"{new} new from your website" if new else ""
     except Exception as exc:
-        status, msg = describe_http_error(exc)
-        set_source("x", status, f"Could not read the website's X feed: {msg}")
+        return f"could not read the website's X posts ({describe_http_error(exc)[1]})"
+
+
+# --- Real X posts without the paid X API ---------------------------------------------------------------------------
+# publish.twitter.com/oembed is X's public embed service: for a post link it returns the post's real text and author
+# (404 if the post does not exist). Every post found below is checked there first, so nothing is ever made up.
+BROWSER_UA = "Mozilla/5.0 (compatible; AI-Research-Workbench/1.0; +https://github.com)"
+X_STATUS = re.compile(r"https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/([A-Za-z0-9_]{1,15})/status(?:es)?/(\d{6,25})", re.I)
+TWITTER_EPOCH_MS = 1288834974657
+X_OEMBED = os.environ.get("WORKBENCH_X_OEMBED", "https://publish.twitter.com/oembed")
+GX_EVERY_HOURS = float(os.environ.get("WORKBENCH_GX_EVERY_HOURS", "3"))   # Gemini search for X posts, at most this often
+
+
+def snowflake_time(sid: str) -> Optional[datetime]:
+    """X post IDs encode their creation time (milliseconds since 2010-11-04)."""
+    try:
+        return datetime.fromtimestamp(((int(sid) >> 22) + TWITTER_EPOCH_MS) / 1000, tz=timezone.utc)
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def x_oembed(cl: httpx.Client, handle: str, sid: str, via: str) -> Optional[dict]:
+    """The real post (text, author, time) or None if X says it does not exist. Raises on network trouble."""
+    r = cl.get(X_OEMBED, params={"url": f"https://x.com/{handle}/status/{sid}", "omit_script": "1", "dnt": "true"},
+               follow_redirects=True)
+    if r.status_code in (403, 404, 410):
+        return None
+    r.raise_for_status()
+    j = r.json()
+    m = re.search(r"<p[^>]*>(.*?)</p>", j.get("html") or "", re.S)
+    body = m.group(1) if m else ""
+    body = re.sub(r"<br\s*/?>", "\n", body)
+    links = []
+    for href in re.findall(r'<a href="(https://t\.co/[^"]+)"', body):
+        links.append(htmllib.unescape(href))
+    body = re.sub(r'<a href="(https://t\.co/[^"]+)">[^<]*</a>', lambda mm: htmllib.unescape(mm.group(1)), body)
+    text = htmllib.unescape(re.sub(r"<[^>]+>", "", body)).strip()
+    author = (j.get("author_url") or "").rstrip("/").rsplit("/", 1)[-1] or handle
+    when = snowflake_time(sid)
+    if not text or not when:
+        return None
+    return {"id": str(sid), "network": "x", "via": via, "handle": author, "name": j.get("author_name") or author,
+            "avatar": None, "verified": False, "text": text, "url": f"https://x.com/{author}/status/{sid}",
+            "created_at": iso(when), "likes": None, "reposts": None, "replies": None, "quotes": None, "views": None,
+            "media": [], "links": links[:4]}
+
+
+def _verify_x_candidates(cl: httpx.Client, cands: dict[str, tuple[str, str]], limit: int = 25) -> list[dict]:
+    """cands: post id -> (handle, via). Skips posts already stored, known-missing ones and posts older than 7 days."""
+    try:
+        bad = set(json.loads(get_setting("xstate_oembed_bad") or "[]"))
+    except ValueError:
+        bad = set()
+    week = now_utc() - timedelta(days=X_KEEP_DAYS)
+    with db() as c:
+        have = {r[0] for r in c.execute(f"SELECT id FROM xposts WHERE id IN ({','.join('?' * len(cands))})", list(cands))} if cands else set()
+    out, checked = [], 0
+    for sid, (handle, via) in cands.items():
+        if sid in have or sid in bad or (snowflake_time(sid) or week) < week:
+            continue
+        if checked >= limit:
+            break
+        checked += 1
+        p = x_oembed(cl, handle, sid, via)
+        if p is None:
+            bad.add(sid)
+        else:
+            out.append(p)
+    set_setting("xstate_oembed_bad", json.dumps(sorted(bad)[-1000:]))
+    return out
+
+
+def fetch_x_linked(cl: httpx.Client) -> str:
+    """X posts that Hacker News stories, news items and Bluesky posts link to (free; AI stories only)."""
+    week = iso(now_utc() - timedelta(days=X_KEEP_DAYS))
+    cands: dict[str, tuple[str, str]] = {}
+    with db() as c:
+        for url, source in c.execute("SELECT url, source FROM news WHERE COALESCE(published, first_seen) >= ? AND "
+                                     "(url LIKE '%x.com/%/status%' OR url LIKE '%twitter.com/%/status%')", (week,)):
+            m = X_STATUS.search(url or "")
+            if m:
+                cands.setdefault(m.group(2), (m.group(1), "hn" if source == "hn" else "news"))
+        for (links,) in c.execute("SELECT links FROM xposts WHERE network='bsky' AND created_at >= ?", (week,)):
+            for u in json.loads(links or "[]"):
+                m = X_STATUS.search(u or "")
+                if m:
+                    cands.setdefault(m.group(2), (m.group(1), "bsky"))
+    if not cands:
+        return ""
+    posts = _verify_x_candidates(cl, cands)
+    new = store_x_posts(posts, {h.lower(): g for h, g in x_accounts()})
+    return f"{new} linked post{_s(new)} added" if new else ""
+
+
+def fetch_x_gemini(cl: httpx.Client) -> str:
+    """Gemini + Google Search looks for the newest X posts of the X accounts list; each link it finds is checked on X.
+    Google Search in Gemini is a paid-tier feature (paid keys include 5,000 free searches a month): on a free key the
+    request answers 'quota exceeded', and the app waits 12 hours before trying again."""
+    key = (get_setting("gemini_api_key") or os.environ.get("WORKBENCH_GEMINI_KEY", "")).strip()
+    if not key:
+        return ""
+    now = now_utc()
+    for k in ("xstate_gx_backoff", "xstate_gx_last"):
+        t = parse_iso(get_setting(k))
+        wait = timedelta(0) if t is None else (t - now if k == "xstate_gx_backoff" else t + timedelta(hours=GX_EVERY_HOURS) - now)
+        if wait > timedelta(0):
+            return get_setting("xstate_gx_msg") or ""
+    set_setting("xstate_gx_last", iso())
+    handles = [h for h, _ in x_accounts()]
+    prompt = (f"Today is {now:%Y-%m-%d} (UTC). Use Google Search to find posts published on X (x.com, formerly Twitter) in "
+              f"the last 2 days by these AI companies and AI researchers: {', '.join('@' + h for h in handles)}. Look for their "
+              "newest posts about AI models, products, research and company news.\nList every post you found, one per line, as:\n"
+              "https://x.com/<handle>/status/<number> | <handle> | <one short sentence about the post>\n"
+              "Only list links you actually saw in the search results; never guess a link. If you found none, answer NONE.")
+    model = clean_model_name(get_setting("gemini_model") or DEFAULT_MODEL)
+    body = {"contents": [{"role": "user", "parts": [{"text": prompt}]}], "tools": [{"google_search": {}}],
+            "generationConfig": {"temperature": 0.1}}
+
+    def note(msg: str, backoff_h: float = 0) -> str:
+        set_setting("xstate_gx_msg", msg)
+        if backoff_h:
+            set_setting("xstate_gx_backoff", iso(now + timedelta(hours=backoff_h)))
+        return msg
+
+    try:
+        r = httpx.post(f"{GEMINI_BASE}/models/{model}:generateContent", json=body, timeout=GEMINI_TIMEOUT, verify=SSL_CTX,
+                       headers={"x-goog-api-key": key, "User-Agent": USER_AGENT})
+    except httpx.HTTPError as exc:
+        return note(f"Gemini search: could not reach Gemini ({describe_http_error(exc)[1]})", 1)
+    if r.status_code == 429:
+        return note("Gemini search: Google answered 'quota exceeded'. Google Search in Gemini needs a billing-enabled key "
+                    "(it includes 5,000 free searches a month); trying again in 12 h", 12)
+    if r.status_code >= 400:
+        return note(f"Gemini search: HTTP {r.status_code}: {_gemini_error_message(r)[:160]}", 3)
+    try:
+        cand = (r.json().get("candidates") or [{}])[0]
+    except ValueError:
+        return note("Gemini search: the answer was not JSON", 1)
+    text = "".join(p.get("text", "") for p in ((cand.get("content") or {}).get("parts") or []) if not p.get("thought"))
+    cands: dict[str, tuple[str, str]] = {m.group(2): (m.group(1), "gemini") for m in X_STATUS.finditer(text)}
+    # The search results themselves: Google's redirect links lead to the pages Gemini read; keep those that are X posts.
+    for ch in ((cand.get("groundingMetadata") or {}).get("groundingChunks") or [])[:20]:
+        uri = (ch.get("web") or {}).get("uri") or ""
+        if not uri.startswith(("https://", "http://")):
+            continue
+        try:
+            loc = cl.get(uri, follow_redirects=False).headers.get("location") or ""
+        except httpx.HTTPError:
+            continue
+        m = X_STATUS.search(loc)
+        if m:
+            cands.setdefault(m.group(2), (m.group(1), "gemini"))
+    posts = _verify_x_candidates(cl, cands, limit=30) if cands else []
+    new = store_x_posts(posts, {h.lower(): g for h, g in x_accounts()})
+    rejected = len(cands) - len(posts)
+    return note(f"Gemini search {now:%H:%M} UTC: {len(cands)} post link{_s(len(cands))} found, {new} new verified on X"
+                + (f", {rejected} skipped (already shown, older than 7 days or not on X)" if rejected else ""))
 
 
 # ---------------------------------------------------------------------------
@@ -3314,7 +3479,10 @@ def x_items(q: str = "", group: str = "all", sort: str = "latest", limit: int = 
 def x_info() -> dict:
     cfg = x_config()
     p = X_PROVIDERS[cfg["provider"]]
+    gkey = bool((get_setting("gemini_api_key") or os.environ.get("WORKBENCH_GEMINI_KEY", "")).strip())
     return {"configured": bool(cfg["key"]), "provider": cfg["provider"], "provider_label": p["label"],
+            "gemini_search": {"has_key": gkey, "every_hours": GX_EVERY_HOURS, "message": get_setting("xstate_gx_msg"),
+                              "last": get_setting("xstate_gx_last"), "by_website": bool(SITE_URL)},
             "bsky_accounts": [{"handle": h, "group": g} for h, g in bsky_accounts()],
             "per_post": p["per_post"], "cap": cfg["cap"], "reads_today": _x_reads_today(),
             "max_month_usd": round(cfg["cap"] * 30 * p["per_post"], 2),
@@ -3988,9 +4156,10 @@ def brief_pool(limit: int = 40) -> list[dict]:
         rows = [dict(r) for r in c.execute(
             """SELECT * FROM news WHERE seen_at IS NULL AND COALESCE(published, first_seen) >= ?
                ORDER BY COALESCE(trend_score, 0) DESC LIMIT ?""", (since, limit))]
-        if len(rows) < 6:   # everything read: fall back to the freshest items overall
+        if len(rows) < 6:   # everything read: fall back to the top items of the News window (never older)
             rows = [dict(r) for r in c.execute(
-                "SELECT * FROM news ORDER BY COALESCE(trend_score, 0) DESC LIMIT ?", (limit,))]
+                "SELECT * FROM news WHERE COALESCE(published, first_seen) >= ? ORDER BY COALESCE(trend_score, 0) DESC LIMIT ?",
+                (window_cutoff(NEWS_WINDOW_HOURS)[1], limit))]
     return rows
 
 
@@ -5133,9 +5302,17 @@ def news_visit_prev() -> Optional[str]:
     return get_setting("news_visit_prev")
 
 
+NEWS_WINDOW_HOURS = 14 * 24     # the News page never shows anything older than this (by its original date)
+
+
+def window_cutoff(hours: Optional[int]) -> tuple[int, str]:
+    h = max(1, min(int(hours or NEWS_WINDOW_HOURS), NEWS_WINDOW_HOURS))
+    return h, iso(now_utc() - timedelta(hours=h))
+
+
 @app.get("/api/news")
 def list_news(q: str = "", category: str = "all", kind: str = "all", sort: str = "trending",
-              view: str = "all", fresh: str = "auto", limit: int = 48, offset: int = 0):
+              view: str = "all", window: int = NEWS_WINDOW_HOURS, limit: int = 48, offset: int = 0):
     limit, offset = max(1, min(limit, 200)), max(0, offset)
     joins, where, params = "", [], []
     fts = fts_query(q) if q.strip() else ""
@@ -5149,11 +5326,11 @@ def list_news(q: str = "", category: str = "all", kind: str = "all", sort: str =
         where.append("n.kind = ?")
         params.append(kind)
     when = "COALESCE(n.published, n.first_seen)"   # models: creation date; repos: release/creation date
-    fresh_on = fresh == "1" or (fresh == "auto" and sort in ("trending", "latest"))
-    if fresh_on:   # created/published in the last 14 days, or (models) weights re-uploaded in the last 14 days
-        cutoff = iso(now_utc() - timedelta(days=FRESH_DAYS))
-        where.append(f"({when} >= ? OR (n.kind = 'model' AND n.updated_at >= ?))")
-        params += [cutoff, cutoff]
+    # Strict time window, in every sort: published/created within the chosen window (at most 14 days). An old model
+    # whose files were re-uploaded does not count as new.
+    hours, cutoff = window_cutoff(window)
+    where.append(f"{when} >= ?")
+    params.append(cutoff)
     prev = news_visit_prev()
     if view == "unread":
         where.append("n.seen_at IS NULL")
@@ -5168,23 +5345,24 @@ def list_news(q: str = "", category: str = "all", kind: str = "all", sort: str =
         "relevance": "f.rank" if fts else f"{when} DESC",
     }.get(sort, f"{when} DESC")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-    window = min(800, (offset + limit) * 4)
+    row_cap = min(800, (offset + limit) * 4)
     try:
         with db() as c:
             rows = c.execute(f"SELECT n.* FROM news n {joins} {where_sql} ORDER BY {order} LIMIT ?",
-                             [*params, window]).fetchall()
-            counts = {k: c.execute("SELECT COUNT(*) FROM news WHERE EXISTS (SELECT 1 FROM json_each(categories) WHERE value = ?)",
-                                   (k,)).fetchone()[0] for k in NEWS_CATEGORIES}
-            total_items = c.execute("SELECT COUNT(*) FROM news").fetchone()[0]
-            unread = c.execute("SELECT COUNT(*) FROM news WHERE seen_at IS NULL").fetchone()[0]
-            new_since = c.execute("SELECT COUNT(*) FROM news WHERE first_seen > ?", (prev or iso(),)).fetchone()[0]
+                             [*params, row_cap]).fetchall()
+            inwin = "COALESCE(published, first_seen) >= ?"   # counts follow the same window as the list
+            counts = {k: c.execute(f"SELECT COUNT(*) FROM news WHERE {inwin} AND EXISTS (SELECT 1 FROM json_each(categories) WHERE value = ?)",
+                                   (cutoff, k)).fetchone()[0] for k in NEWS_CATEGORIES}
+            total_items = c.execute(f"SELECT COUNT(*) FROM news WHERE {inwin}", (cutoff,)).fetchone()[0]
+            unread = c.execute(f"SELECT COUNT(*) FROM news WHERE {inwin} AND seen_at IS NULL", (cutoff,)).fetchone()[0]
+            new_since = c.execute(f"SELECT COUNT(*) FROM news WHERE {inwin} AND first_seen > ?", (cutoff, prev or iso())).fetchone()[0]
     except sqlite3.OperationalError as exc:
         raise HTTPException(400, f"Search could not be run: {exc}")
     groups = group_stories([_news_out(r) for r in rows])
     if sort == "trending" and kind == "all" and not fts and category in ("all", "model_release"):
         groups = ensure_model_slots(groups)
-    return {"items": groups[offset:offset + limit], "more": len(groups) > offset + limit or len(rows) == window,
-            "shown_events": len(groups[:offset + limit]), "total_items": total_items, "fresh": fresh_on,
+    return {"items": groups[offset:offset + limit], "more": len(groups) > offset + limit or len(rows) == row_cap,
+            "shown_events": len(groups[:offset + limit]), "total_items": total_items, "fresh": True, "window_hours": hours,
             "unread": unread, "new_since_visit": new_since, "last_visit": prev,
             "category_counts": counts, "categories": NEWS_CATEGORIES}
 

@@ -70,8 +70,16 @@ The **X & Bluesky** tab shows posts from AI labs, researchers and AI reporters (
 - **Bluesky** works with no key and costs nothing: 21 accounts that are active there (Simon Willison, Ethan Mollick,
   Nathan Lambert, Emily Bender, Arvind Narayanan, Ai2, Epoch AI, PyTorch, Casey Newton and others). Many AI people
   stopped posting on Bluesky, so they are only on X.
-- **X** (Anthropic, OpenAI, Google DeepMind, Gemini, Meta, Mistral, xAI, DeepSeek, Qwen, Hugging Face, Karpathy,
-  Sam Altman, Demis Hassabis and others) has no free way to read posts, so it needs one paid, pay-per-use key:
+- **X posts arrive three ways.** Every post is checked on X itself (X's public embed service) and shown with its
+  real text, so nothing is ever made up:
+  1. **Free, always on:** X posts that Hacker News, the news feeds and Bluesky link to.
+  2. **With your Gemini key (`GEMINI_API_KEY` secret):** every 3 hours Gemini uses Google Search to find the newest
+     posts of the X accounts (Anthropic, OpenAI, Google DeepMind, Gemini, Meta, Mistral, xAI, DeepSeek, Qwen,
+     Hugging Face, Karpathy, Sam Altman, Demis Hassabis and others). Google Search in Gemini only works on a key
+     with **billing turned on** (Google AI Studio → your project → Billing); it includes 5,000 free searches a
+     month and this uses roughly 1,000–2,500, so it should stay free. On a free key Google answers "quota
+     exceeded"; the app then waits 12 hours and the X page says so.
+  3. **Every post of every account:** an X API key, pay per use:
 
 | Service | Price | Get the key |
 |---|---|---|
@@ -261,6 +269,11 @@ from arXiv the first time the app is online.
   Epoch AI, Import AI, TLDR AI, Zvi, Gary Marcus, Lilian Weng, Karpathy; Lobsters) that fail show their own error on the News page under "Feeds (show all)". Anthropic has no RSS
   feed, so its news page is read directly. Meta AI and xAI have no usable feed; they are covered through press,
   newsletters, Hacker News and the X page.
+- **Time window:** News shows only items published (or, for models and repos, created) within the window you pick
+  above the list: 3 h, 24 h, 3 days, 7 days or 14 days (the longest). Nothing older is shown, in any sort; posts on
+  the X & Bluesky page are at most 7 days old; the Live box covers the last 3 hours.
+- **Nothing gets lost:** the website keeps its database between updates (GitHub Actions cache). If that cache is
+  ever lost, the next update rebuilds the news history from the published website instead of starting empty.
 - **Duplicates:** reports of one event are merged into one card (same model, same link, or the same headline in
   other words). A post that a site re-published under a new link, or whose title was corrected, is shown once.
 

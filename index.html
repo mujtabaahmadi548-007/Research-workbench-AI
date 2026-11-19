@@ -880,18 +880,18 @@ function ensureModelSlots(groups) {
 function sNews(q) {
   const sm = seenMap(), tri = LS.get('triage', {}), prev = LS.get('visit', {}).prev || null;
   const text = (q.get('q') || '').trim().toLowerCase(), category = q.get('category') || 'all', kind = q.get('kind') || 'all';
-  const sort = q.get('sort') || 'trending', view = q.get('view') || 'all', fresh = q.get('fresh') || 'auto';
+  const sort = q.get('sort') || 'trending', view = q.get('view') || 'all';
   const limit = clamp(+q.get('limit') || 48, 1, 200), offset = Math.max(0, +q.get('offset') || 0);
-  const cutoff = new Date((Date.parse(D.generated_at) || Date.now()) - 14 * 86400000).toISOString();
-  const freshOnX = fresh === '1' || (fresh === 'auto' && (sort === 'trending' || sort === 'latest'));
+  // strict window measured from *now* (a page left open for hours drops items as they age past it)
+  const hours = clamp(+q.get('window') || 336, 1, 336);
+  const cutoff = new Date(Date.now() - hours * 3600000).toISOString();
   const when = it => it.published || it.first_seen || '';
-  const all = sIdx().leads.map(it => ({ ...it, seen: isSeen(it, sm), brief: it.brief || (tri[it.id] && tri[it.id].brief) || null }));
+  const all = sIdx().leads.filter(it => when(it) >= cutoff).map(it => ({ ...it, seen: isSeen(it, sm), brief: it.brief || (tri[it.id] && tri[it.id].brief) || null }));
   let rows = all;
   const toks = text.split(/[^\p{L}\p{N}.+#-]+/u).filter(Boolean).slice(0, 12);
   if (toks.length) rows = rows.filter(it => { const hay = `${it.title} ${it.summary || ''} ${it.source_name} ${(it.related || []).map(r => r.title).join(' ')}`.toLowerCase(); return toks.every(t => hay.includes(t)); });
   if (category !== 'all') rows = rows.filter(it => (it.categories || []).includes(category));
   if (['article', 'model', 'discussion', 'repo'].includes(kind)) rows = rows.filter(it => it.kind === kind);
-  if (freshOnX) rows = rows.filter(it => when(it) >= cutoff || (it.kind === 'model' && (it.updated_at || '') >= cutoff));
   if (view === 'unread') rows = rows.filter(it => !it.seen);
   else if (view === 'new') rows = prev ? rows.filter(it => (it.first_seen || '') > prev) : [];
   const byWhen = (a, b) => when(b).localeCompare(when(a));
@@ -901,7 +901,7 @@ function sNews(q) {
   const counts = {};
   Object.keys(D.categories || {}).forEach(k => { counts[k] = all.filter(it => (it.categories || []).includes(k)).length; });
   return { items: rows.slice(offset, offset + limit), more: rows.length > offset + limit, shown_events: Math.min(rows.length, offset + limit),
-    total_items: D.news_total, fresh: freshOnX, unread: all.filter(it => !it.seen).length,
+    total_items: all.length, fresh: true, window_hours: hours, unread: all.filter(it => !it.seen).length,
     new_since_visit: prev ? all.filter(it => (it.first_seen || '') > prev).length : 0, last_visit: prev,
     category_counts: counts, categories: D.categories };
 }
@@ -909,7 +909,8 @@ function sX(q) {
   const X = D.x || { items: [], configured: false, accounts: [], providers: {} };
   const text = (q.get('q') || '').trim().toLowerCase(), group = q.get('group') || 'all', sort = q.get('sort') || 'latest';
   const limit = clamp(+q.get('limit') || 40, 1, 200), offset = Math.max(0, +q.get('offset') || 0);
-  let rows = X.items || [];
+  const weekAgo = new Date(Date.now() - 7 * 86400000).toISOString();
+  let rows = (X.items || []).filter(p => (p.created_at || '') >= weekAgo);   // posts older than 7 days never show
   const network = q.get('network') || 'all';
   if (network === 'x' || network === 'bsky') rows = rows.filter(p => (p.network || 'x') === network);
   if (['lab', 'people', 'press'].includes(group)) rows = rows.filter(p => p.grp === group);
@@ -1869,14 +1870,17 @@ function repoCard(r) {
 /* ======================================================================
    News: AI labs, press, analysis, new models, community discussion
    ====================================================================== */
-const news = { q: '', category: 'all', kind: 'all', sort: 'latest', view: 'all', freshUser: null, items: [], more: false, req: 0,
+const news = { q: '', category: 'all', kind: 'all', sort: 'latest', view: 'all', window: '336', items: [], more: false, req: 0,
   counts: {}, unread: 0, newSince: 0, lastVisit: null, layout: 'cards' };
+// Time window (hours): nothing older than this is shown, in any sort. 14 days is the longest.
+const NEWS_WINDOWS = [['3', '3 h'], ['24', '24 h'], ['72', '3 days'], ['168', '7 days'], ['336', '14 days']];
+const windowLabel = () => ({ 3: 'the last 3 hours', 24: 'the last 24 hours', 72: 'the last 3 days', 168: 'the last 7 days', 336: 'the last 14 days' })[news.window];
 try { if (localStorage.getItem('wb.newsLayout') === 'compact') news.layout = 'compact'; } catch (e) { /* storage unavailable */ }
+try { const w = localStorage.getItem('wb.newsWindow'); if (NEWS_WINDOWS.some(([v]) => v === w)) news.window = w; } catch (e) { /* storage unavailable */ }
 try { const s = localStorage.getItem('wb.newsSort'); if (['trending', 'latest', 'important'].includes(s)) news.sort = s; } catch (e) { /* storage unavailable */ }
 const NEWS_CATS = [['all', 'All'], ['model_release', 'Model releases'], ['agents', 'Agents'], ['tools', 'Tools & infra'], ['research', 'Research'], ['industry', 'Industry & policy']];
 const CAT_LABEL = Object.fromEntries(NEWS_CATS);
 const STYPE = { lab: 'Official', press: 'Press', analysis: 'Analysis', community: 'Community', hub: 'Model hub', custom: 'Your feed', repo: 'GitHub' };
-const freshOn = () => news.freshUser ?? (news.sort !== 'important');
 function renderNews(ctx) {
   let timer = null;
   const input = h('input', { type: 'search', placeholder: 'Search news, models, repos and discussions…', value: news.q, 'aria-label': 'Search news',
@@ -1914,11 +1918,10 @@ function renderNews(ctx) {
 }
 function drawViewBar() {
   const bar = $('#viewBar'); if (!bar) return;
-  const fresh = freshOn();
   bar.replaceChildren(
+    h('span', { class: 'muted small', title: 'Only news published, released or created within this time. Nothing older is ever shown.' }, 'Show:'),
+    seg(NEWS_WINDOWS, news.window, v => { news.window = v; try { localStorage.setItem('wb.newsWindow', v); } catch (e) { /* ignore */ } loadNews(true); }),
     seg([['all', 'All'], ['unread', `Unread ${news.unread}`], ['new', `New since last visit ${news.newSince}`]], news.view, v => { news.view = v; loadNews(true); }),
-    h('button', { class: 'btn sm' + (fresh ? ' on' : ''), 'aria-pressed': String(fresh), title: 'Only items published, released or created in the last 14 days (on by default for Trending and Latest)',
-      onclick: () => { news.freshUser = !fresh; loadNews(true); } }, (fresh ? '✓ ' : '') + 'Fresh drops only (<14 days)'),
     seg([['cards', 'Cards'], ['compact', 'Compact']], news.layout, v => { news.layout = v; try { localStorage.setItem('wb.newsLayout', v); } catch (e) { /* ignore */ } drawNews(); }),
     h('button', { class: 'btn sm', title: 'Mark every event shown below (and the reports merged into them) as seen', onclick: markViewSeen }, 'Mark current view as seen'),
     news.lastVisit ? h('span', { class: 'muted small' }, 'Last visit ' + ago(news.lastVisit)) : null);
@@ -1966,7 +1969,7 @@ async function loadNews(reset = true) {
   const req = ++news.req;
   const offset = reset ? 0 : news.items.length;
   const qs = new URLSearchParams({ q: news.q, category: news.category, kind: news.kind, sort: news.sort, view: news.view,
-    fresh: freshOn() ? '1' : '0', limit: 30, offset });
+    window: news.window, limit: 30, offset });
   try {
     const data = await api('/api/news?' + qs);
     if (req !== news.req || !$('#newsList')) return;
@@ -1981,10 +1984,10 @@ async function loadNews(reset = true) {
 function drawNews() {
   const list = $('#newsList'); if (!list) return;
   const merged = news.items.reduce((n, it) => n + (it.related || []).length, 0);
-  $('#newsMeta').textContent = news.items.length ? `${news.items.length} events${merged ? ` (${merged} more reports merged into them)` : ''}${news.q ? ` matching “${news.q}”` : ''}${freshOn() ? ' · fresh drops from the last 14 days' : ''}` : '';
+  $('#newsMeta').textContent = news.items.length ? `${news.items.length} events${merged ? ` (${merged} more reports merged into them)` : ''}${news.q ? ` matching “${news.q}”` : ''} · published in ${windowLabel()}` : '';
   if (!news.items.length) {
-    const filtered = news.q || news.category !== 'all' || news.kind !== 'all' || news.view !== 'all' || freshOn();
-    list.replaceChildren(h('div', { class: 'card empty' }, filtered ? 'Nothing matches these filters. Try turning off "Fresh drops only" or switching to All.' : 'No news cached yet. Press Refresh while online.'));
+    const filtered = news.q || news.category !== 'all' || news.kind !== 'all' || news.view !== 'all' || news.window !== '336';
+    list.replaceChildren(h('div', { class: 'card empty' }, filtered ? `Nothing in ${windowLabel()} matches these filters. Try a longer time window or All.` : 'No news from the last 14 days yet. Press Refresh while online.'));
     $('#newsMore').replaceChildren();
     return;
   }
@@ -2001,6 +2004,7 @@ function drawNews() {
    ====================================================================== */
 const xs = { q: '', group: 'all', sort: 'latest', network: 'all', items: [], more: false, req: 0, info: null };
 try { xs.sort = localStorage.getItem('wb.xSort') || 'latest'; } catch (e) { /* storage unavailable */ }
+const X_VIA = { hn: 'linked on Hacker News', news: 'linked in the news', bsky: 'linked on Bluesky', gemini: 'found by Gemini search' };
 const NET = { x: { label: 'X', profile: h2 => 'https://x.com/' + h2, open: 'Open on X' }, bsky: { label: 'Bluesky', profile: h2 => 'https://bsky.app/profile/' + h2, open: 'Open on Bluesky' } };
 function renderX(ctx) {
   let timer = null;
@@ -2042,10 +2046,11 @@ function drawX() {
   const src = r.source || {}, bsrc = r.bsky_source || {};
   const bLast = STATIC && bskyLive.at ? bskyLive.at : bsrc.last_success;
   $('#xStamp').textContent = [bLast ? `Bluesky: checked ${ago(bLast)}${STATIC ? ' (this page checks every minute)' : ''}` : null,
-    r.configured || src.last_success ? `X: ${src.last_success ? 'read ' + ago(src.last_success) + ' · ' : ''}${src.message || r.provider_label}` : 'X: not connected yet'].filter(Boolean).join(' · ');
+    `X: ${src.last_success ? 'checked ' + ago(src.last_success) : 'not checked yet'}${src.message ? ' · ' + src.message : ''}`].filter(Boolean).join(' · ');
   const setup = $('#xSetup');
-  if (!r.configured && !src.last_success) {
-    setup.replaceChildren(h('details', { class: 'card xconnect' }, h('summary', null, h('b', null, 'X posts need an API key'), ' — Bluesky posts below are free. Show how to connect X'), xSetupCard(r)));
+  if (!r.configured) {
+    setup.replaceChildren(h('details', { class: 'card xconnect' }, h('summary', null, h('b', null, 'X posts: '),
+      'posts linked from the news are added for free; Gemini search or an X API key brings more. Show how'), xSetupCard(r)));
   } else if (src.status && !['ok', 'running', 'never'].includes(src.status)) setup.replaceChildren(h('div', { class: 'note ' + (src.status === 'rate_limited' ? 'warn' : 'bad') }, src.message || 'X could not be read.'));
   else setup.replaceChildren();
   const accts = [...(r.accounts || []).map(a => ({ ...a, net: 'x' })), ...(r.bsky_accounts || []).map(a => ({ ...a, net: 'bsky' }))];
@@ -2082,6 +2087,7 @@ function xPost(p) {
         h('a', { class: 'muted', href: NET[net].profile(p.handle), target: '_blank', rel: 'noopener noreferrer' }, '@' + p.handle),
         h('span', { class: 'muted', title: new Date(p.created_at).toLocaleString() }, '· ' + ago(p.created_at)),
         p2(net === 'x' ? '𝕏' : '🦋 Bluesky', 'spec', 'Posted on ' + NET[net].label),
+        net === 'x' && X_VIA[p.via] ? p2(X_VIA[p.via], '', 'How this post got here (it was checked on X; likes and views are only known with an X API key)') : null,
         p.grp === 'lab' ? p2('AI lab', 'src-lab') : p.grp === 'press' ? p2('Reporter', '') : null),
       h('p', { class: 'xtext' }, xRich(p.text || '', net)),
       (p.media || []).length ? h('div', { class: 'xmedia' }, p.media.map(m => safeUrl(m.url) ? h('a', { href: (m.type === 'link' && (p.links || [])[0]) || url || m.url, target: '_blank', rel: 'noopener noreferrer' },
@@ -2155,7 +2161,7 @@ async function liveNewsTick() {
         items = sIdx().leads.filter(it => when(it) > cutoff && it.kind !== 'model');
         try { items = items.concat(await liveHN()); liveFeed.failed = false; } catch (e) { liveFeed.failed = true; }
       } else {
-        const r = await api('/api/news?' + new URLSearchParams({ sort: 'latest', fresh: '1', limit: 40 }));
+        const r = await api('/api/news?' + new URLSearchParams({ sort: 'latest', window: String(LIVE_HOURS), limit: 40 }));
         items = r.items.filter(it => when(it) > cutoff && it.kind !== 'model');
       }
       liveFeed.at = nowIso();
@@ -2189,14 +2195,20 @@ function xSetupCard(r) {
   const month = per => `about $${(cap * 30 * per).toFixed(cap * 30 * per < 1 ? 2 : 0)}/month at most`;
   const repo = STATIC && D && D.repo ? D.repo : null;
   const ext = (label, href) => h('a', { href, target: '_blank', rel: 'noopener noreferrer' }, label + ' ↗');
+  const gs = r.gemini_search || {};
   return h('section', { class: 'card xsetup' },
-    h('h2', { style: { marginBottom: '6px' } }, 'Connect X'),
-    h('p', { class: 'small', style: { margin: 0 } }, `Reading posts from X needs an API key; X no longer offers free reading. Both options below are pay-per-use, and the app reads at most ${cap} posts a day (you can change that), so the cost has a ceiling:`),
+    h('h2', { style: { marginBottom: '6px' } }, 'How X posts get here'),
+    h('ol', { class: 'small', style: { marginTop: 0 } },
+      h('li', null, h('b', null, 'Free, always on: '), 'X posts that Hacker News, the news feeds and Bluesky link to. Each one is checked on X and shown with its real text.'),
+      h('li', null, h('b', null, 'With your Gemini key: '), `Gemini searches Google every ${gs.every_hours || 3} hours for the newest posts of the X accounts listed, and every post it finds is checked on X before it is shown (nothing made up). Google Search in Gemini only works on a key with billing turned on (Google AI Studio → your project → Billing). It includes 5,000 free searches a month; this uses roughly 1,000–2,500, so it should stay free.`,
+        gs.message ? h('span', { class: 'xgs' }, ' Status: ', gs.message, '.') : (gs.has_key ? null : ' Add the GEMINI_API_KEY secret first.')),
+      h('li', null, h('b', null, 'Every post of every account: '), 'an X API key (pay per use).')),
+    h('p', { class: 'small', style: { margin: '10px 0 0' } }, `X API options (the app reads at most ${cap} posts a day, so the cost has a ceiling):`),
     h('ol', { class: 'small' },
       h('li', null, h('b', null, 'Official X API'), ` — $${(prov.x || {}).per_post || 0.005} per post read, ${month((prov.x || {}).per_post || 0.005)}. Create an app at `, ext('developer.x.com', 'https://developer.x.com'),
         ', buy credits, set a spending limit, and copy the app\'s Bearer Token. ', ext('Pricing', 'https://docs.x.com/x-api/getting-started/pricing')),
       h('li', null, h('b', null, 'twitterapi.io'), ` — an unofficial service, about $0.15 per 1,000 posts (${month((prov.twitterapi || {}).per_post || 0.00015)}); new accounts get $1 of free credit. Sign up at `, ext('twitterapi.io', 'https://twitterapi.io'), ' and copy the API key.')),
-    h('p', { class: 'small', style: { margin: '10px 0 0' } }, h('b', null, 'Where to put the key')),
+    h('p', { class: 'small', style: { margin: '10px 0 0' } }, h('b', null, 'Where to put an X API key')),
     h('ol', { class: 'small' },
       h('li', null, 'Website (phone and computer): GitHub → your repository → Settings → Secrets and variables → Actions → ', h('b', null, 'New repository secret'), ' named ', h('code', null, 'X_API_KEY'),
         '. For twitterapi.io also add, on the Variables tab, ', h('code', null, 'X_API_PROVIDER'), ' = ', h('code', null, 'twitterapi'), '. Posts appear here within about 5 minutes, and the desktop app then shows them too without a key of its own.',
