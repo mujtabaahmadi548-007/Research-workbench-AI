@@ -3173,6 +3173,8 @@ X_STATUS = re.compile(r"https?://(?:www\.|mobile\.)?(?:x|twitter)\.com/([A-Za-z0
 TWITTER_EPOCH_MS = 1288834974657
 X_OEMBED = os.environ.get("WORKBENCH_X_OEMBED", "https://publish.twitter.com/oembed")
 GX_EVERY_HOURS = float(os.environ.get("WORKBENCH_GX_EVERY_HOURS", "3"))   # Gemini search for X posts, at most this often
+GX_FALLBACK_MODEL = "gemini-flash-lite-latest"
+GX_RESET = "2026-11-19-billing-on"   # changing this makes the next run try Gemini search right away
 
 
 def snowflake_time(sid: str) -> Optional[datetime]:
@@ -3259,11 +3261,16 @@ def fetch_x_linked(cl: httpx.Client) -> str:
 def fetch_x_gemini(cl: httpx.Client) -> str:
     """Gemini + Google Search looks for the newest X posts of the X accounts list; each link it finds is checked on X.
     Google Search in Gemini is a paid-tier feature (paid keys include 5,000 free searches a month): on a free key the
-    request answers 'quota exceeded', and the app waits 12 hours before trying again."""
+    request answers 'quota exceeded', and the app tries again an hour later (so it starts by itself once billing is on;
+    refused requests cost nothing)."""
     key = (get_setting("gemini_api_key") or os.environ.get("WORKBENCH_GEMINI_KEY", "")).strip()
     if not key:
         return ""
     now = now_utc()
+    if get_setting("xstate_gx_reset") != GX_RESET:   # a code change can ask for an immediate new try
+        for k in ("xstate_gx_backoff", "xstate_gx_last", "xstate_gx_msg"):
+            set_setting(k, None)
+        set_setting("xstate_gx_reset", GX_RESET)
     for k in ("xstate_gx_backoff", "xstate_gx_last"):
         t = parse_iso(get_setting(k))
         wait = timedelta(0) if t is None else (t - now if k == "xstate_gx_backoff" else t + timedelta(hours=GX_EVERY_HOURS) - now)
@@ -3282,18 +3289,30 @@ def fetch_x_gemini(cl: httpx.Client) -> str:
 
     def note(msg: str, backoff_h: float = 0) -> str:
         set_setting("xstate_gx_msg", msg)
-        if backoff_h:
+        if backoff_h:   # a failed try: only the backoff decides when the next one happens
             set_setting("xstate_gx_backoff", iso(now + timedelta(hours=backoff_h)))
+            set_setting("xstate_gx_last", None)
         return msg
 
-    try:
-        r = httpx.post(f"{GEMINI_BASE}/models/{model}:generateContent", json=body, timeout=GEMINI_TIMEOUT, verify=SSL_CTX,
-                       headers={"x-goog-api-key": key, "User-Agent": USER_AGENT})
-    except httpx.HTTPError as exc:
-        return note(f"Gemini search: could not reach Gemini ({describe_http_error(exc)[1]})", 1)
+    r = None
+    for m in dict.fromkeys([model, GX_FALLBACK_MODEL]):   # an overloaded model (503) gets one try on Flash-Lite
+        try:
+            r = httpx.post(f"{GEMINI_BASE}/models/{m}:generateContent", json=body, timeout=GEMINI_TIMEOUT, verify=SSL_CTX,
+                           headers={"x-goog-api-key": key, "User-Agent": USER_AGENT})
+        except httpx.HTTPError as exc:
+            if m == GX_FALLBACK_MODEL:
+                return note(f"Gemini search: could not reach Gemini ({describe_http_error(exc)[1]}); trying again soon", 0.25)
+            continue
+        if r.status_code < 500:
+            break
+    if r is None:
+        return note("Gemini search: could not reach Gemini; trying again soon", 0.25)
     if r.status_code == 429:
-        return note("Gemini search: Google answered 'quota exceeded'. Google Search in Gemini needs a billing-enabled key "
-                    "(it includes 5,000 free searches a month); trying again in 12 h", 12)
+        return note(f"Gemini search {now:%H:%M} UTC: Google answered 'quota exceeded'. Google Search in Gemini only works "
+                    "once billing is active for the key's Google project (it includes 5,000 free searches a month); "
+                    "trying again every hour", 1)
+    if r.status_code >= 500:
+        return note(f"Gemini search: Gemini is overloaded (HTTP {r.status_code}); trying again soon", 0.25)
     if r.status_code >= 400:
         return note(f"Gemini search: HTTP {r.status_code}: {_gemini_error_message(r)[:160]}", 3)
     try:

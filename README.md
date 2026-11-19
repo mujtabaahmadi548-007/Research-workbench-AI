@@ -78,7 +78,9 @@ The **X & Bluesky** tab shows posts from AI labs, researchers and AI reporters (
      Hugging Face, Karpathy, Sam Altman, Demis Hassabis and others). Google Search in Gemini only works on a key
      with **billing turned on** (Google AI Studio → your project → Billing); it includes 5,000 free searches a
      month and this uses roughly 1,000–2,500, so it should stay free. On a free key Google answers "quota
-     exceeded"; the app then waits 12 hours and the X page says so.
+     exceeded"; the app then tries again every hour (refused requests cost nothing) and the X page says so, so it
+     starts by itself once billing is active. Check that the key's project shows a paid plan in Google AI Studio →
+     API keys.
   3. **Every post of every account:** an X API key, pay per use:
 
 | Service | Price | Get the key |
