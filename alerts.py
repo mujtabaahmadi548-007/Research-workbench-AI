@@ -381,6 +381,54 @@ def collect(cl: httpx.Client, state: dict) -> tuple[list[dict], dict]:
     return [c for c in cands if c["kind"] != "breakthrough_check"], doc_keys
 
 
+# --------------------------------------------------------------------------------------------- is it really new?
+BREAKTHROUGH_MAX_AGE = timedelta(hours=36)   # older stories are not "breaking", however popular they get later
+_MONTH_DATE = re.compile(r"\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2}),?\s+(20\d\d)\b")
+
+
+def page_date(cl: httpx.Client, url: str) -> Optional[datetime]:
+    """The article's own publication date: meta tags / JSON-LD / <time>, else the first written date near the top."""
+    r = fetch(cl, url)
+    if r is None or "html" not in r.headers.get("content-type", "html"):
+        return None
+    t = r.text
+    for pat in (r'<meta[^>]+(?:property|name|itemprop)="(?:article:published_time|og:published_time|datePublished|date|pubdate|publish-date|dc\.date)"[^>]+content="([^"]+)"',
+                r'"datePublished"\s*:\s*"([^"]+)"', r'<time[^>]+datetime="([^"]+)"'):
+        m = re.search(pat, t, re.I)
+        if m and parse_date(m.group(1)):
+            return parse_date(m.group(1))
+    text = re.sub(r"<[^>]+>", " ", re.sub(r"(?is)<(script|style|nav|header)\b.*?</\1>", " ", t))[:6000]
+    m = _MONTH_DATE.search(text)
+    if m:
+        try:
+            return datetime.strptime(f"{m.group(1)[:3]} {m.group(2)} {m.group(3)}", "%b %d %Y").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def story_origin(cl: httpx.Client, c: dict) -> tuple[Optional[datetime], str]:
+    """When a story really started: the earliest of its own date and its first Hacker News submission (a story is
+    often re-posted days later and only then goes viral)."""
+    dates: list[tuple[datetime, str]] = []
+    url = c["url"]
+    if "news.ycombinator.com" not in url:
+        u = httpx.URL(url)
+        for h in hn(cl, "search", {"tags": "story", "query": u.host + u.path, "restrictSearchableAttributes": "url", "hitsPerPage": 20}):
+            d = parse_date(h.get("created_at"))
+            if d and (h.get("url") or "").split("?")[0].rstrip("/").lower() == url.split("?")[0].rstrip("/").lower():
+                dates.append((d, "first posted on Hacker News"))
+        d = page_date(cl, url)
+        if d:
+            dates.append((d, "dated on the page"))
+    if c.get("published") and parse_date(c["published"]):
+        dates.append((parse_date(c["published"]), "posted"))
+    if not dates:
+        return None, ""
+    d, how = min(dates, key=lambda x: x[0])
+    return d, how
+
+
 # --------------------------------------------------------------------------------------------- state + notify
 def covered(state: dict, c: dict) -> bool:
     """Already alerted, or the same release under a shorter/longer name ('GPT-6' vs 'gpt-6-astra') recently."""
@@ -439,6 +487,50 @@ def notify(c: dict, dry: bool) -> None:
             print("  ntfy failed:", exc)
 
 
+def retract_old_breakthroughs(cl: httpx.Client, state: dict, dry: bool) -> int:
+    """Breakthrough alerts sent before the age check existed: if the story turns out to be older than allowed, take it
+    off the alert list, remember its link in state['retracted'] (the website then drops its 🚨 badge), and close its
+    GitHub issue with a short explanation. Each alert is checked once."""
+    keep = []
+    for a in state.get("alerts", []):
+        if a.get("kind") != "breakthrough" or a.get("origin_checked"):
+            keep.append(a)
+            continue
+        origin, how = story_origin(cl, {"url": a.get("url", ""), "published": a.get("published")})
+        a["origin_checked"] = iso()
+        detected = parse_date(a.get("detected")) or NOW
+        if origin and detected - origin > BREAKTHROUGH_MAX_AGE:
+            print(f"  Retracting old breakthrough alert ({how} {origin:%Y-%m-%d}): {a.get('title', '')[:90]}")
+            state.setdefault("retracted", []).append({"url": a.get("url"), "title": a.get("title"), "origin": iso(origin), "at": iso()})
+            if not dry:
+                close_alert_issue(a, f"Correction: this was not new. The story started {origin:%B %d, %Y} ({how}); it only went "
+                                     "viral later on a re-post. Alerts now check a story's real age and skip anything older "
+                                     f"than {int(BREAKTHROUGH_MAX_AGE.total_seconds() // 3600)} hours.")
+            continue
+        keep.append(a)
+    n = len(state.get("alerts", [])) - len(keep)
+    state["alerts"] = keep
+    state["retracted"] = state.get("retracted", [])[-100:]
+    return n
+
+
+def close_alert_issue(a: dict, note: str) -> None:
+    token, repo = os.environ.get("GITHUB_TOKEN"), os.environ.get("GITHUB_REPOSITORY")
+    if not token or not repo:
+        return
+    gh = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json", "User-Agent": UA}
+    try:
+        r = httpx.get(f"https://api.github.com/repos/{repo}/issues", headers=gh, timeout=20,
+                      params={"state": "open", "labels": "alert", "per_page": 50})
+        for issue in r.json() if r.status_code == 200 else []:
+            if (a.get("title") or "~") in (issue.get("title") or ""):
+                httpx.post(issue["comments_url"], headers=gh, timeout=20, json={"body": note})
+                httpx.patch(issue["url"], headers=gh, timeout=20, json={"state": "closed", "state_reason": "not_planned"})
+                print("  Closed issue", issue.get("html_url"))
+    except Exception as exc:
+        print("  Could not close the issue:", exc)
+
+
 def set_output(**kv) -> None:
     out = os.environ.get("GITHUB_OUTPUT")
     if out:
@@ -462,20 +554,33 @@ def main() -> int:
     before = json.dumps(state, sort_keys=True)
     first_run = not state.get("initialized")
 
+    state.setdefault("alerted", {})
+    state.setdefault("alerts", [])
     with httpx.Client(timeout=25, follow_redirects=True, verify=ssl_context(), headers={"User-Agent": UA}) as cl:
         cands, doc_keys = collect(cl, state)
+        retracted = retract_old_breakthroughs(cl, state, args.dry_run)
+        new = []
+        # When the announcement and the docs change land in the same check, link the announcement.
+        cands.sort(key=lambda c: 0 if "(official)" in c["source"] else 1 if c["source"].startswith("Hacker News") else 2)
+        for c in cands:
+            if covered(state, c):
+                continue
+            if c["kind"] == "breakthrough":
+                origin, how = story_origin(cl, c)
+                if origin and NOW - origin > BREAKTHROUGH_MAX_AGE:
+                    print(f"  Not new ({how} {origin:%Y-%m-%d}): {c['title'][:90]}")
+                    state["alerted"][c["key"]] = {"at": iso(), "title": c["title"], "url": c["url"], "skipped": "old",
+                                                  "origin": iso(origin)}
+                    continue
+                if origin:
+                    c["evidence"].append(f"Story started {iso(origin)} ({how})")
+            new.append(c)
     state.setdefault("doc_ids", {})
     for vendor, keys in doc_keys.items():   # union: a page that briefly drops an ID must not re-alert it later
         state["doc_ids"][vendor] = sorted(set(state["doc_ids"].get(vendor, [])) | set(keys))
-    state.setdefault("alerted", {})
-    state.setdefault("alerts", [])
 
-    new = []
-    # When the announcement and the docs change land in the same check, link the announcement.
-    cands.sort(key=lambda c: 0 if "(official)" in c["source"] else 1 if c["source"].startswith("Hacker News") else 2)
+    cands, new = new, []
     for c in cands:
-        if covered(state, c):
-            continue
         if c["kind"] == "breakthrough" and not first_run and gemini_confirms(c) is False:
             print("  Gemini says not major:", c["title"][:100])
             state["alerted"][c["key"]] = {"at": iso(), "title": c["title"], "url": c["url"], "skipped": "gemini"}
@@ -511,7 +616,8 @@ def main() -> int:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(state, indent=1, ensure_ascii=False), encoding="utf-8")
     print(f"Checked at {iso()}: {len(cands)} candidates, {len(new)} new alert(s), state {'saved' if changed else 'unchanged'}.")
-    set_output(changed=str(changed).lower(), new_alerts=str(bool(new)).lower())
+    # a retraction is saved right away too (the alerts loop then ends early), so the website drops it within minutes
+    set_output(changed=str(changed).lower(), new_alerts=str(bool(new) or bool(retracted)).lower())
     return 0
 
 

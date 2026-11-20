@@ -2834,6 +2834,23 @@ def ingest_alerts(alerts: list[dict]) -> int:
     return new
 
 
+def retract_alerts(retracted: list[dict]) -> int:
+    """Alerts withdrawn by alerts.py (e.g. an old story that only went viral later): drop their News items and badges."""
+    n = 0
+    with db() as c:
+        for r in retracted or []:
+            url = str(r.get("url") or "")
+            if not url:
+                continue
+            n += c.execute("DELETE FROM news WHERE source='alerts' AND url=?", (url,)).rowcount
+            for row in c.execute("SELECT id, metrics FROM news WHERE url=? OR id=?", (url, news_id(url))).fetchall():
+                m = json.loads(row["metrics"] or "{}")
+                if m.pop("alert", None):
+                    c.execute("UPDATE news SET metrics=? WHERE id=?", (json.dumps(m), row["id"]))
+                    n += 1
+    return n
+
+
 def fmt_utc(value: Optional[str]) -> str:
     d = parse_iso(value)
     return f"{d:%b} {d.day}, {d:%H:%M} UTC" if d else "recently"
@@ -2847,7 +2864,9 @@ def sync_site_alerts() -> None:
         with httpx.Client(timeout=HTTP_TIMEOUT, follow_redirects=True, verify=SSL_CTX, headers={"User-Agent": USER_AGENT}) as cl:
             r = cl.get(SITE_URL.rstrip("/") + "/alerts.json", params={"t": int(time.time())})
             r.raise_for_status()
-            alerts = r.json().get("alerts") or []
+            j = r.json()
+            alerts = j.get("alerts") or []
+        retract_alerts(j.get("retracted") or [])
         n = ingest_alerts(alerts)
         if n:
             log.info("Alerts: %d new model release/breakthrough alert(s) added to News.", n)

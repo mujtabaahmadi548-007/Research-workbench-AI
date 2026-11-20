@@ -95,6 +95,13 @@ def main() -> int:
     S.backfill_scores()
     # Highest alerts (new Claude/Gemini/GPT models, breakthroughs) also go on the News page
     raw_alerts = load_alerts(Path(args.alerts))
+    retracted = load_retracted(Path(args.alerts))
+    try:
+        raw_alerts = check_alert_ages(S, raw_alerts, retracted)
+    except Exception as exc:
+        print(f"Alerts: age check skipped ({type(exc).__name__}: {exc})")
+    if S.retract_alerts(retracted):
+        print(f"Alerts: removed {len(retracted)} withdrawn alert(s) from the News page.")
     n_alerts = S.ingest_alerts(raw_alerts)
     if n_alerts:
         print(f"Alerts: {n_alerts} alert(s) added to the News page.")
@@ -132,6 +139,7 @@ def main() -> int:
 
     data = build_snapshot(S, args.max_papers)
     data["alerts"] = raw_alerts
+    data["alerts_retracted"] = retracted
     data["gemini"] = gemini_report
     write_site(Path(args.site), data)
     if args.save_db:
@@ -371,6 +379,45 @@ def x_snapshot(S) -> dict:
     return {**info, "items": items, "total": total, "source": dict(src) if src else None}
 
 
+def check_alert_ages(S, alerts_list: list[dict], retracted: list[dict]) -> list[dict]:
+    """Same age rule as alerts.py, applied here too so the website never shows an old story as a breakthrough alert
+    (each alert link is checked once; the result is remembered in the database)."""
+    import httpx
+    sys.path.insert(0, str(HERE))
+    import alerts as A
+    keep, done = [], {r.get("url") for r in retracted}
+    with httpx.Client(timeout=25, follow_redirects=True, verify=A.ssl_context(), headers={"User-Agent": A.UA}) as cl:
+        for a in alerts_list:
+            url = a.get("url") or ""
+            if url in done:   # already withdrawn by alerts.py
+                continue
+            if a.get("kind") != "breakthrough":
+                keep.append(a)
+                continue
+            skey = "xstate_alert_origin:" + url[:200]
+            cached = S.get_setting(skey)
+            if cached is None:
+                origin, _how = A.story_origin(cl, {"url": url, "published": a.get("published")})
+                cached = A.iso(origin) if origin else ""
+                S.set_setting(skey, cached)
+            origin = A.parse_date(cached) if cached else None
+            detected = A.parse_date(a.get("detected")) or A.NOW
+            if origin and detected - origin > A.BREAKTHROUGH_MAX_AGE:
+                print(f"Alerts: not new (started {origin:%Y-%m-%d}), hidden: {a.get('title', '')[:80]}")
+                retracted.append({"url": url, "title": a.get("title"), "origin": cached})
+                continue
+            keep.append(a)
+    return keep
+
+
+def load_retracted(path: Path) -> list[dict]:
+    """Alerts that alerts.py withdrew (e.g. an old story that went viral again)."""
+    try:
+        return [r for r in json.loads(path.read_text(encoding="utf-8")).get("retracted", []) if r.get("url")]
+    except (OSError, ValueError):
+        return []
+
+
 def load_alerts(path: Path) -> list[dict]:
     """The newest highest alerts (model releases, breakthroughs) recorded by alerts.py."""
     try:
@@ -396,7 +443,8 @@ def write_site(site: Path, data: dict) -> None:
     (site / "version.json").write_text(json.dumps({"generated_at": data["generated_at"], "news_sync_at": data.get("news_sync_at"),
                                                    "news": len(data["news"])}), encoding="utf-8")
     # Small side files for the desktop app (server.py reads them when it has no X key / no alerts job of its own)
-    (site / "alerts.json").write_text(json.dumps({"generated_at": data["generated_at"], "alerts": data.get("alerts") or []},
+    (site / "alerts.json").write_text(json.dumps({"generated_at": data["generated_at"], "alerts": data.get("alerts") or [],
+                                                 "retracted": data.get("alerts_retracted") or []},
                                                  ensure_ascii=False), encoding="utf-8")
     (site / "x.json").write_text(json.dumps({"generated_at": data["generated_at"], **(data.get("x") or {})},
                                             ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
