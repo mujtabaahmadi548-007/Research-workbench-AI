@@ -29,8 +29,11 @@ HERE = Path(__file__).resolve().parent
 PLACEHOLDER = "<!-- STATIC_DATA -->"
 KEEP_SETTINGS = ("news_sync_at", "news_visit_last", "news_visit_prev", "new_per_day", "score_version",
                  "gh_releases_last", "arxiv_max_results", "hf_limit", "custom_feeds",
-                 "site_gemini_last", "site_gemini_report", "x_provider", "x_accounts", "x_daily_cap", "bsky_accounts")
-KEEP_PREFIXES = ("feed_baseline:", "xstate_")   # undated-feed memory; X read positions and today's read count
+                 "site_gemini_last", "site_gemini_report", "x_provider", "x_accounts", "x_daily_cap", "bsky_accounts",
+                 "news_sanitize_version", "cluster_threshold")
+# undated-feed memory; X read positions and today's read count; News intelligence state (pauses after Gemini errors,
+# last report). Never the Gemini key (gemini_api_key), which is deleted from every copy.
+KEEP_PREFIXES = ("feed_baseline:", "xstate_", "intel_")
 
 
 def copy_database(src: Path, dst: Path) -> None:
@@ -108,13 +111,18 @@ def main() -> int:
     if not args.refresh:
         S.rescore_news()
     gemini_report: dict = {"enabled": bool(key), "note": "no Gemini step in this build (republish only)" if key else "no GEMINI_API_KEY secret"}
-    # Builds run every few minutes; Gemini (free quota) only joins every --gemini-every hours. In between, the
-    # key is not even loaded and the website keeps showing the report of the last Gemini build.
+    # Builds run every few minutes. Two Gemini tiers protect the free quota:
+    #  - light, every build that fetched news: the News filter + embeddings (only new items, in batches of 30-50,
+    #    so a quiet build makes no call) and the Frontier Brief when the news moved (server.brief_due);
+    #  - heavy, every --gemini-every hours: per-story triage and paper breakdowns.
     last_gemini = S.parse_iso(S.get_setting("site_gemini_last"))
+    light_due = bool(key) and args.refresh
     gemini_due = bool(key) and args.refresh and (
         last_gemini is None or (S.now_utc() - last_gemini).total_seconds() >= args.gemini_every * 3600)
+    intel_report: dict = {"note": "no Gemini key" if not key else "republish only: no News filter run"}
+    brief_report: dict = {}
     try:
-        if gemini_due:
+        if light_due or gemini_due:
             S.set_setting("gemini_api_key", key)
         if args.refresh:
             print("Fetching fresh data: news feeds, Hugging Face, arXiv, Hacker News, GitHub...")
@@ -122,6 +130,11 @@ def main() -> int:
             S.start_refresh("site", None, force=False)
             wait_while(S._refresh_lock, 1800)
             fetch_figures(S, args.figures)
+        if light_due:
+            intel_report = redact(S.intel_step(key), key)
+            print("News intelligence:", json.dumps(intel_report, ensure_ascii=False)[:1500])
+            brief_report = redact(write_brief_if_due(S, key), key)
+            print("Frontier Brief:", json.dumps(brief_report, ensure_ascii=False))
         if gemini_due:
             gemini_report = run_gemini(S, args.analyze, key)
             S.set_setting("site_gemini_last", S.iso())
@@ -140,7 +153,8 @@ def main() -> int:
     data = build_snapshot(S, args.max_papers)
     data["alerts"] = raw_alerts
     data["alerts_retracted"] = retracted
-    data["gemini"] = gemini_report
+    data["gemini"] = {**gemini_report, "intel": intel_report, "brief_check": brief_report}
+    data["intel_items"] = S.intel_snapshot()
     write_site(Path(args.site), data)
     if args.save_db:
         with S.db() as c:
@@ -151,6 +165,39 @@ def main() -> int:
         print(f"Saved the database to {dst}.")
     shutil.rmtree(tmp, ignore_errors=True)
     return 0
+
+
+def redact(obj, key: str):
+    """Belt and braces: no report that goes on the website may contain the key, even inside an error message."""
+    if not key:
+        return obj
+    return json.loads(json.dumps(obj, ensure_ascii=False).replace(key, "***"))
+
+
+BRIEF_RETRY_MIN = 30   # after a failed brief, wait this long before the next build tries again
+
+
+def write_brief_if_due(S, key: str) -> dict:
+    """Rewrite Today's Frontier Brief when the news moved (S.brief_due), with the deep model, in this process."""
+    due, why = S.brief_due()
+    rep = {"due": due, "reason": why}
+    if not due:
+        return rep
+    failed = S.parse_iso(S.get_setting("intel_brief_fail_at"))
+    if failed and (S.now_utc() - failed).total_seconds() < BRIEF_RETRY_MIN * 60:
+        rep.update(written=False, note=f"last attempt failed {int((S.now_utc() - failed).total_seconds() // 60)} min ago; "
+                                       f"retrying after {BRIEF_RETRY_MIN} min")
+        return rep
+    _wait_out_rate_limit(S)
+    model = S.intel_models()["deep"]
+    try:
+        _data, used = S._write_brief(key, model)
+        S.set_setting("intel_brief_fail_at", None)
+        rep.update(written=True, model=used)
+    except S.GeminiError as e:
+        S.set_setting("intel_brief_fail_at", S.iso())
+        rep.update(written=False, model=model, error=e.message[:300])
+    return rep
 
 
 def recover_from_site(S, url: str) -> None:
@@ -248,7 +295,7 @@ def run_gemini(S, n_analyze: int, key: str = "") -> dict:
     with S.db() as c:
         queue = [{"paper": r["arxiv_id"], "status": r["status"], "kind": r["kind"], "message": (r["message"] or "")[:200]}
                  for r in c.execute("SELECT arxiv_id, status, kind, message FROM analysis_queue WHERE status != 'running'")]
-    brief = S.frontier_brief_get()
+    brief = S.latest_brief()
     report = {"enabled": True, "checked_at": S.iso(),
               "triaged_this_build": after["triaged"] - before["triaged"],
               "breakdowns_this_build": after["analyses"] - before["analyses"],
@@ -265,9 +312,7 @@ def _run_gemini_steps(S, n_analyze: int) -> None:
     except Exception as exc:
         print("Gemini triage skipped:", exc)
     _wait_out_rate_limit(S)
-    if S.start_brief_regen(force=True) or S._brief_lock.locked():
-        wait_while(S._brief_lock, 300)
-    _wait_out_rate_limit(S)
+    # (Today's Frontier Brief is written by write_brief_if_due in every build where the news moved.)
     if n_analyze > 0:
         latest = "COALESCE(p.latest_at, p.published, p.first_seen)"
         with S.db() as c:
@@ -287,8 +332,8 @@ def _run_gemini_steps(S, n_analyze: int) -> None:
 
 def build_snapshot(S, max_papers: int) -> dict:
     _, cutoff = S.window_cutoff(S.NEWS_WINDOW_HOURS)   # the website only carries news from the last 14 days
-    with S.db() as c:
-        rows = c.execute("SELECT * FROM news WHERE COALESCE(published, first_seen) >= ? "
+    with S.db() as c:   # items the Gemini filter marked "not about AI" stay off the page (see data.dropped)
+        rows = c.execute("SELECT * FROM news WHERE COALESCE(published, first_seen) >= ? AND COALESCE(ai_relevant, 1) = 1 "
                          "ORDER BY COALESCE(trend_score, 0) DESC, COALESCE(published, first_seen) DESC", (cutoff,)).fetchall()
         raw = {r["id"]: dict(r) for r in rows}
         news_total = len(rows)
@@ -308,7 +353,7 @@ def build_snapshot(S, max_papers: int) -> dict:
             except Exception as exc:
                 print("Quickstart skipped for", g["id"][:60], exc)
 
-    brief = S.frontier_brief_get()
+    brief = S.latest_brief()
     brief = {k: brief.get(k) for k in ("status", "brief", "items", "model", "generated_at", "sync_id")}
 
     picks: dict[str, None] = {}
@@ -367,6 +412,10 @@ def build_snapshot(S, max_papers: int) -> dict:
         "questions": questions,
         "settings": {"new_per_day": S.setting_int("new_per_day", 0, 500)},
         "x": x_snapshot(S),
+        # News intelligence: which models the build uses, coverage counts, and the items the AI filter dropped
+        # (shown only when "Show dropped items" is on in the site's Settings)
+        "intel": {"models": S.intel_models(), "threshold": S.cluster_threshold(), "totals": S.intel_counts()},
+        "dropped": S.dropped_items(72, 150),
     }
 
 
@@ -429,6 +478,7 @@ def load_alerts(path: Path) -> list[dict]:
 
 
 def write_site(site: Path, data: dict) -> None:
+    intel_items = data.pop("intel_items", None) or {}   # its own file (intel.json), not part of data.js
     html = (HERE / "index.html").read_text(encoding="utf-8")
     if PLACEHOLDER not in html:
         raise SystemExit(f"index.html has no {PLACEHOLDER} marker.")
@@ -448,6 +498,9 @@ def write_site(site: Path, data: dict) -> None:
                                                  ensure_ascii=False), encoding="utf-8")
     (site / "x.json").write_text(json.dumps({"generated_at": data["generated_at"], **(data.get("x") or {})},
                                             ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    # Gemini filter results (relevance, category, impacts, event) per item: the desktop app reuses them
+    (site / "intel.json").write_text(json.dumps({"generated_at": data["generated_at"], **intel_items},
+                                                ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     (site / "index.html").write_text(html, encoding="utf-8")
     (site / ".nojekyll").write_text("", encoding="utf-8")
     print(f"Website written to {site}: {len(data['news'])} news events, {len(data['papers'])} papers, "

@@ -192,7 +192,7 @@ included `.gitignore` keeps that file out of git.
 
 | Tab | What it does |
 | --- | --- |
-| **News** | New AI models, agents and AI technology. Sources: official blogs (OpenAI, Google DeepMind, Google AI, Google Research, Microsoft Research, NVIDIA, Hugging Face, AWS), tech press (TechCrunch, The Verge, MIT Technology Review, Ars Technica, MarkTechPost), expert newsletters (Simon Willison, Import AI, Latent Space, Interconnects), trending and new models on Hugging Face, and AI stories on Hacker News. Reports about the same launch are merged into one event card, led by the lab's own announcement. Filter by Model releases / Agents / Tools & infra / Research / Industry & policy. Add your own RSS feeds in Settings. |
+| **News** | New AI models, agents and AI technology. Sources: official blogs (OpenAI, Google DeepMind, Google AI, Google Research, Microsoft Research, NVIDIA, Hugging Face, AWS), tech press (TechCrunch, The Verge, MIT Technology Review, Ars Technica, MarkTechPost), expert newsletters (Simon Willison, Import AI, Latent Space, Interconnects), trending and new models on Hugging Face, and AI stories on Hacker News. Reports about the same event are merged into one card, led by the best source tier, with the other outlets as pills. Filter by Model releases / Agents / Tools & infra / Research / Industry & policy / Hardware & chips. Add your own RSS feeds in Settings. |
 | **Papers** | Live papers (Hugging Face Daily Papers and the newest arXiv cs.AI / cs.CL / cs.LG), deduplicated by arXiv ID, with full-text search. **Refresh** pulls new data; each source shows when it was last fetched and any error. The **Repos & releases** tab tracks inference engines, agent frameworks and open-weight model repos on GitHub. |
 | **Paper page** | Click any paper, then **Deconstruct with Gemini**. You get: (a) the bottleneck it attacks, (b) the mechanism step by step and what changed vs prior baselines, (c) an interactive parameter calculator, (d) lineage, (e) 6–18-month implications and (f) 3 engineering questions. Each paper is analyzed once and cached. Breakdowns are generated from the abstract only and are labeled as unverified. |
 | **Systems Lab** | Four calculators that work without a key: KV-cache memory (MHA / GQA / MQA / quantized KV), test-time compute curves, a multi-model router simulator, and an agent state-machine trace inspector. |
@@ -200,11 +200,60 @@ included `.gitignore` keeps that file out of git.
 | **Review** | Spaced repetition (SM-2). Due questions come first, then new ones. Grade **Again / Hard / Good / Easy** (keys 1–4) after seeing the explanation. |
 | **Settings** | Gemini key and model, startup fetch, papers per refresh, new questions per day, and the analysis queue. |
 
+### The Gemini news filter (relevance, impact, one card per event)
+
+With a Gemini key (the website: the `GEMINI_API_KEY` repository secret), every refresh runs three steps on the
+news that just arrived (`news_intel.py` holds the pure parts, `server.intel_step` the pipeline):
+
+1. **Clean text first.** Every snippet goes through a sanitizer before it is stored or sent to Gemini. It strips
+   HTML and entities and removes publisher boilerplate such as "The post … appeared first on …", "Get our breaking
+   news email, free app or daily news podcast", "READ ON:", "Continue reading", and truncated tails. Every source
+   also has a **tier**: *primary* (lab blogs, docs and newsrooms, Hugging Face, GitHub releases, arXiv, highest
+   alerts), *community* (Hacker News, Lobsters, curated newsletters such as Import AI or ChinAI) or *press*.
+2. **One card per event.** Each new item's `"title. first 280 characters of the snippet"` is embedded with
+   `gemini-embedding-001` (`SEMANTIC_SIMILARITY`, 768 dimensions, L2-normalized by the app, cached per item, so
+   nothing is embedded twice). An item joins an event when its cosine similarity to the event's average vector is
+   at least **0.82** and the event's first report is within 48 hours. Items with the same Gemini `event_slug` are
+   merged too. The card's headline comes from the best tier (primary > community > press), then the earliest
+   report. The other outlets appear as pills: **+5 sources: Nvidia Newsroom · Techmeme · The Decoder …**
+3. **Batched scoring.** One `gemini-3.5-flash-lite` call (Structured Outputs) scores 30–50 new items at a time.
+   It sends a batch when 30 items are waiting, or 20 minutes after the oldest one arrived, so quiet builds make no
+   call. It returns:
+   - `is_ai_relevant`: non-AI stories such as comedy reviews or word-of-the-year lists are dropped.
+     Settings → *Show the items the AI filter dropped* lists them at the bottom of the News page.
+   - `category`: one of Model releases, Agents, Tools & infra, Research, Industry & policy, Hardware & chips.
+   - `technical_impact` and `industry_impact` (0–50 each; routine vendor PR is kept at 12 or less).
+   - `event_slug` and a one-line *Why it matters*.
+
+   The score on the card is computed from these, never by Gemini:
+   `max(tech, industry) + round(0.35 × min(tech, industry)) + 5 per extra outlet (at most +20) + 6 for a primary
+   source (else +3 for a Hacker News story with 100+ points)`. The tiers are **75+ Major**, **50–74 Notable** and
+   **below 50 Low**. Hover the score to see each part.
+
+Items not scored yet (no key, quota used up, or minutes old) keep the older keyword/engagement score and keyword
+categories, so the page always works. The three models are set in the desktop app's Settings:
+- **deep** (`gemini-3.8-flash`): Triage, the Frontier Brief, Review cards and breakdowns;
+- **filter** (`gemini-3.5-flash-lite`);
+- **embedding** (`gemini-embedding-001`).
+
+The website build uses the same defaults, which the environment variables `WORKBENCH_MODEL_DEEP`,
+`WORKBENCH_MODEL_FILTER` and `WORKBENCH_MODEL_EMBED` override. A model ID your key does not have (HTTP 404) is
+replaced by `gemini-flash-latest` or `gemini-flash-lite-latest` and remembered for 6 hours. The desktop app first
+copies the website's results (`intel.json`), so the free quota is not spent twice.
+
 ### Working with the News page
 
-- **Today's Frontier Brief** (top of the page): Gemini reads your *unread* items and writes a 15-second
-  summary of the top 3 model releases, top 3 agent/tooling items and the main research trend. It is
-  written once per refresh and cached. Without a key you get automatic picks instead.
+- **Today's Frontier Brief** (top of the page): Gemini (the deep model, Structured Outputs) reads today's top
+  events and writes an executive summary plus short sections: Top model releases, Agents & tooling, Research trend,
+  Industry & policy. Each entry links the event's lead report and names its outlets. It is rewritten in these cases,
+  at most every 30 minutes:
+  - a new **Major** event arrives;
+  - 3+ new Notable events arrive and the brief is 90 minutes old;
+  - any new Notable event arrives and the brief is 3 hours old;
+  - the brief is 12 hours old.
+
+  Major stories that arrive after the brief was written show on top as **Breaking since this brief**. Without a
+  key you get automatic picks per section.
 - **Fresh drops only (<14 days)** is on by default for Trending and Latest, so months-old models with huge
   lifetime download counts don't bury this week's releases. Most important shows everything.
 - **Unread / New since last visit / Mark current view as seen** keep track of what you have read
@@ -278,8 +327,10 @@ from arXiv the first time the app is online.
   the X & Bluesky page are at most 7 days old; the Live box covers the last 3 hours.
 - **Nothing gets lost:** the website keeps its database between updates (GitHub Actions cache). If that cache is
   ever lost, the next update rebuilds the news history from the published website instead of starting empty.
-- **Duplicates:** reports of one event are merged into one card (same model, same link, or the same headline in
-  other words). A post that a site re-published under a new link, or whose title was corrected, is shown once.
+- **Duplicates:** reports of one event are merged into one card. With a key this uses Gemini embeddings and
+  event slugs (see "The Gemini news filter"); without one it uses the same model, the same link, or the same
+  headline in other words. A post that a site re-published under a new link, or whose title was corrected, is
+  shown once.
 
 ---
 
@@ -314,8 +365,10 @@ from the list (any model with "flash" in its name is a good choice), then click 
 | File | Purpose |
 | --- | --- |
 | `server.py` | FastAPI server: paper, news, model and GitHub ingestion, figures and preview images, importance scoring, SQLite + FTS5 storage, Gemini calls with JSON validation and a retry queue, SM-2 scheduling, starter content. |
+| `news_intel.py` | News intelligence helpers (no network, no database): snippet sanitizer, source tiers, embedding math (L2 normalization, cosine, centroids), the Gemini JSON schemas and validators for the news filter and the Frontier Brief, and the display score. |
+| `tests/test_news_intel.py` | Unit tests for `news_intel.py`: `.\.venv\Scripts\python.exe -m unittest discover -s tests` |
 | `index.html` | The whole user interface: vanilla JavaScript and SVG, no build step. The same page runs the website (it switches to website mode when `data.js` is present). |
-| `build_site.py` | Builds the website into `site/`: fetches sources, then writes `data.js`, `version.json` and `index.html`. GitHub Actions runs it about every 5 minutes. |
+| `build_site.py` | Builds the website into `site/`: fetches sources and runs the news filter, then writes `data.js`, `version.json`, `intel.json` (the filter results, which the desktop app reuses) and `index.html`. GitHub Actions runs it about every 5 minutes. |
 | `.github/workflows/update-site.yml` | The GitHub Actions workflow that builds and publishes the website to GitHub Pages. |
 | `alerts.py` | Highest alerts: detects official Claude / Gemini / GPT releases and major breakthroughs, and notifies you. |
 | `.github/workflows/alerts.yml` | Runs `alerts.py` every 5 minutes on GitHub. |
