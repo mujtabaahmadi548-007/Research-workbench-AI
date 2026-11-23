@@ -253,15 +253,24 @@ the same model is retried after 2 s and then 5 s, and after that the next model 
 
 | Task | Chain |
 | --- | --- |
-| News filter / scoring | `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-3.6-flash` |
-| Frontier Brief, Triage, Review cards, breakdowns | `gemini-3.8-flash` → `gemini-3.6-flash` → `gemini-3.5-flash-lite` |
+| News filter / scoring | `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-3.8-flash` |
+| Frontier Brief, Triage, Review cards, breakdowns | `gemini-4-hydrogen` → `gemini-3.8-flash` → `gemini-3.5-flash-lite` |
 
 Google's `-latest` alias for the same family is the last resort in both chains.
 
-- **Overloaded or rate-limited models** rest about 12 minutes, then are used again.
-- **Models that don't exist for the key** (HTTP 404) are skipped for 6 hours.
-- **Thinking level:** scoring, the brief and Triage send `thinkingConfig.thinkingLevel: "low"` to Gemini 3 models, so
-  GitHub Actions runs don't time out.
+- **Overloaded or rate-limited models** rest about 12 minutes, then are used again. A whole step never rests longer
+  than 1 hour after a quota error, even when Google says to wait 16 hours (except a rejected key: 6 hours).
+- **Models the key cannot use** (HTTP 404, 403 or 402) are skipped for 6 hours.
+- **Thinking level:** always set explicitly. The scheduled website work (scoring, the brief, paper breakdowns) uses
+  `"low"`, so GitHub Actions runs don't time out; Triage and review cards use `"medium"`.
+- **Gemini 4 request rules** (`gemini-4-*`, e.g. `gemini-4-hydrogen`; the default is `"high"`, which is slow):
+  - no `temperature`, `topP` or `topK`;
+  - never `thinkingBudget` or `thinkingLevel: "minimal"` (both are rejected with HTTP 400): only `low`, `medium`,
+    `high` or `xhigh`;
+  - `maxOutputTokens` of at least 32768, because thinking tokens count toward it;
+  - no `cachedContent`.
+- **Embeddings stay on `gemini-embedding-001`** (`SEMANTIC_SIMILARITY`, 768 dimensions, L2-normalized) so stored
+  vectors never mix vector spaces.
 - **Where you see the outcome:** the model that actually answered is shown in Settings and published in `intel.json`
   (`used`).
 

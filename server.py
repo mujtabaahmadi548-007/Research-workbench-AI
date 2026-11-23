@@ -89,7 +89,7 @@ GEMINI_BASE = os.environ.get("WORKBENCH_GEMINI_BASE", "https://generativelanguag
 #   deep:   on-demand Triage, Today's Frontier Brief, Review (SM-2) cards and paper breakdowns
 #   filter: the batched news filter (AI relevance, category, technical/industry impact), 30-50 items per request
 #   embed:  embeddings for merging reports of one event (768 dimensions, L2-normalized)
-DEFAULT_MODEL = os.environ.get("WORKBENCH_MODEL_DEEP", "").strip() or "gemini-3.8-flash"
+DEFAULT_MODEL = os.environ.get("WORKBENCH_MODEL_DEEP", "").strip() or "gemini-4-hydrogen"
 DEFAULT_FILTER_MODEL = os.environ.get("WORKBENCH_MODEL_FILTER", "").strip() or "gemini-3.5-flash-lite"
 DEFAULT_EMBED_MODEL = os.environ.get("WORKBENCH_MODEL_EMBED", "").strip() or "gemini-embedding-001"
 OLD_DEFAULT_MODELS = {"gemini-flash-latest"}   # earlier default: databases that still hold it move to the new default
@@ -3895,7 +3895,7 @@ def auto_refresh_loop() -> None:
 # Gemini paper deconstructor
 # ---------------------------------------------------------------------------
 class GeminiError(Exception):
-    """kind: no_key | auth | rate_limit | offline | server | model | bad_output | no_abstract"""
+    """kind: no_key | auth | rate_limit | offline | server | model (404) | denied (402/403) | bad_output | no_abstract"""
 
     def __init__(self, kind: str, message: str, retry_after: Optional[float] = None):
         super().__init__(message)
@@ -3940,9 +3940,11 @@ def _raise_for_gemini(resp: httpx.Response, model: str) -> None:
         return
     msg = _gemini_error_message(resp)
     if code == 429:
-        raise GeminiError("rate_limit", f"Gemini rate limit or free-tier quota reached. {msg}", _retry_after(resp))
-    if code in (401, 403) or (code == 400 and "api key" in msg.lower()):
+        raise GeminiError("rate_limit", f"Gemini {model}: rate limit or free-tier quota reached. {msg}", _retry_after(resp))
+    if code == 401 or (code in (400, 403) and re.search(r"api.?key", msg, re.I)):
         raise GeminiError("auth", f"Gemini rejected the API key. {msg}")
+    if code in (402, 403):   # this model is not open to this key (billing / permission): skip it for 6 h
+        raise GeminiError("denied", f"Gemini {model} is not available to this key (HTTP {code}). {msg}")
     if code == 404:
         raise GeminiError("model", f"Model '{model}' was not found. Pick another model in Settings. {msg}")
     if code == 503:
@@ -4004,11 +4006,39 @@ def model_alias(model: str) -> Optional[str]:
 # Per-request fallback chains. On 503 (overloaded / UNAVAILABLE), 429 (rate limit or quota) or a timeout, the same
 # model is retried after 2 s and 5 s, then the next model in the chain is tried. A model that kept failing is skipped
 # for MODEL_COOLDOWN only (it is used again once capacity clears); a model that does not exist (404) for 6 hours.
-FILTER_CHAIN = ["gemini-3.1-flash-lite", "gemini-3.6-flash"]     # after the filter model (gemini-3.5-flash-lite)
-DEEP_CHAIN = ["gemini-3.6-flash", "gemini-3.5-flash-lite"]       # after the deep model (gemini-3.8-flash)
-MODEL_COOLDOWN = 12 * 60
-_THINKING_LEVEL_MODELS = re.compile(r"^gemini-3")   # thinkingConfig.thinkingLevel is a Gemini 3 setting
-_no_thinking: set[str] = set()                      # models that rejected thinkingConfig (sent without it after that)
+FILTER_CHAIN = ["gemini-3.1-flash-lite", "gemini-3.8-flash"]     # after the filter model (gemini-3.5-flash-lite)
+DEEP_CHAIN = ["gemini-3.8-flash", "gemini-3.5-flash-lite"]       # after the deep model (gemini-4-hydrogen)
+MODEL_COOLDOWN = 12 * 60     # 503 / 429 / timeout: skip the model this long, then use it again
+_THINKING_LEVEL_MODELS = re.compile(r"^gemini-[34]")   # thinkingConfig.thinkingLevel (Gemini 3 and 4)
+_no_thinking: set[str] = set()                         # Gemini 3 models that rejected thinkingConfig
+# Gemini 4 request rules: no temperature / topP / topK; never thinkingBudget or thinkingLevel "minimal" (both answer
+# HTTP 400); thinking tokens count toward maxOutputTokens, so at least 32768; no cachedContent. Hydrogen thinks at
+# "high" unless told otherwise, which is too slow for the 5-minute builds: every request sets a level explicitly.
+GEMINI4_LEVELS = ("low", "medium", "high", "xhigh")
+GEMINI4_MIN_OUTPUT_TOKENS = 32768
+
+
+def is_gemini4(model: str) -> bool:
+    return (model or "").startswith("gemini-4-")
+
+
+def gemini_generation_config(model: str, max_tokens: int = 16384, temperature: Optional[float] = None,
+                             schema: Optional[dict] = None, thinking: Optional[str] = None, json_mode: bool = True) -> dict:
+    """generationConfig for one request, following each model family's rules (see GEMINI4_* above)."""
+    gen: dict[str, Any] = {"maxOutputTokens": max_tokens}
+    if json_mode or schema is not None:
+        gen["responseMimeType"] = "application/json"
+    if schema is not None:
+        gen["responseJsonSchema"] = schema
+    if is_gemini4(model):
+        gen["maxOutputTokens"] = max(int(max_tokens or 0), GEMINI4_MIN_OUTPUT_TOKENS)
+        gen["thinkingConfig"] = {"thinkingLevel": thinking if thinking in GEMINI4_LEVELS else "low"}
+        return gen   # no temperature / topP / topK, no thinkingBudget
+    if temperature is not None:
+        gen["temperature"] = temperature
+    if thinking and _THINKING_LEVEL_MODELS.match(model) and model not in _no_thinking:
+        gen["thinkingConfig"] = {"thinkingLevel": thinking}
+    return gen
 
 
 def model_chain(model: str, kind: str = "deep") -> list[str]:
@@ -4089,7 +4119,7 @@ def call_gemini(prompt: str, key: str, model: str, system: str, schema: Optional
                 return text
             except GeminiError as e:
                 last = e
-                if e.kind == "model":
+                if e.kind in ("model", "denied"):   # 404 / 403 / 402: skip this model for 6 hours
                     _mark_model_missing(m)
                     tried.append(f"{m} (not available)")
                     break
@@ -4109,13 +4139,7 @@ def call_gemini(prompt: str, key: str, model: str, system: str, schema: Optional
 def _gemini_once(prompt: str, key: str, model: str, system: str, schema: Optional[dict] = None,
                  max_tokens: int = 16384, temperature: Optional[float] = 0.4, timeout: Optional[float] = None,
                  thinking: Optional[str] = None) -> str:
-    gen: dict[str, Any] = {"responseMimeType": "application/json", "maxOutputTokens": max_tokens}
-    if temperature is not None:
-        gen["temperature"] = temperature
-    if schema is not None:
-        gen["responseJsonSchema"] = schema
-    if thinking and _THINKING_LEVEL_MODELS.match(model) and model not in _no_thinking:
-        gen["thinkingConfig"] = {"thinkingLevel": thinking}
+    gen = gemini_generation_config(model, max_tokens, temperature, schema, thinking)
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -4130,8 +4154,8 @@ def _gemini_once(prompt: str, key: str, model: str, system: str, schema: Optiona
         raise GeminiError("offline", "Gemini did not answer in time.") from exc
     except httpx.HTTPError as exc:
         raise GeminiError("offline", f"Could not reach Gemini. {describe_http_error(exc)[1]}.") from exc
-    if r.status_code == 400 and "thinkingConfig" in gen and "thinking" in r.text.lower():
-        _no_thinking.add(model)   # this model does not take thinkingLevel: send the request without it
+    if r.status_code == 400 and "thinkingConfig" in gen and "thinking" in r.text.lower() and not is_gemini4(model):
+        _no_thinking.add(model)   # this Gemini 3 model does not take thinkingLevel: send the request without it
         log.info("Gemini: %s does not accept thinkingLevel; retrying without it.", model)
         return _gemini_once(prompt, key, model, system, schema, max_tokens, temperature, timeout, None)
     _raise_for_gemini(r, model)
@@ -4156,19 +4180,35 @@ def _gemini_once(prompt: str, key: str, model: str, system: str, schema: Optiona
 EMBED_BATCH = 100   # batchEmbedContents accepts up to 100 texts per request
 
 
+def embed_request_body(texts: list[str], model: str) -> dict:
+    """The batchEmbedContents body: one fixed model, taskType SEMANTIC_SIMILARITY, 768 dimensions (never changed, so
+    stored vectors stay in one vector space)."""
+    return {"requests": [{"model": f"models/{model}", "content": {"parts": [{"text": t[:2000]}]},
+                          "taskType": "SEMANTIC_SIMILARITY", "outputDimensionality": NI.EMBED_DIM} for t in texts]}
+
+
 def embed_batch(texts: list[str], key: str, model: str) -> list[list[float]]:
     """gemini-embedding-001 via batchEmbedContents: taskType SEMANTIC_SIMILARITY, outputDimensionality 768.
-    Returns L2-normalized vectors (Google only normalizes the full 3,072-dimension output)."""
+    Returns L2-normalized vectors (Google only normalizes the full 3,072-dimension output). A 503 / 429 / timeout is
+    retried on the SAME model after 2 s and 5 s (no fallback model: vectors from two models cannot be compared)."""
     model = clean_model_name(model)
-    body = {"requests": [{"model": f"models/{model}", "content": {"parts": [{"text": t[:2000]}]},
-                          "taskType": "SEMANTIC_SIMILARITY", "outputDimensionality": NI.EMBED_DIM} for t in texts]}
-    try:
-        r = httpx.post(f"{GEMINI_BASE}/models/{model}:batchEmbedContents", json=body,
-                       headers={"x-goog-api-key": key, "User-Agent": USER_AGENT}, timeout=GEMINI_TIMEOUT, verify=SSL_CTX)
-    except httpx.TimeoutException as exc:
-        raise GeminiError("offline", "Gemini embeddings did not answer in time.") from exc
-    except httpx.HTTPError as exc:
-        raise GeminiError("offline", f"Could not reach Gemini. {describe_http_error(exc)[1]}.") from exc
+    body = embed_request_body(texts, model)
+    r = None
+    for attempt, delay in enumerate((0.0, *GEMINI_RETRY_DELAYS)):
+        if delay:
+            time.sleep(delay)
+        try:
+            r = httpx.post(f"{GEMINI_BASE}/models/{model}:batchEmbedContents", json=body,
+                           headers={"x-goog-api-key": key, "User-Agent": USER_AGENT}, timeout=GEMINI_TIMEOUT, verify=SSL_CTX)
+        except httpx.TimeoutException as exc:
+            if attempt == len(GEMINI_RETRY_DELAYS):
+                raise GeminiError("offline", "Gemini embeddings did not answer in time.") from exc
+            continue
+        except httpx.HTTPError as exc:
+            raise GeminiError("offline", f"Could not reach Gemini. {describe_http_error(exc)[1]}.") from exc
+        if r.status_code in (429, 500, 502, 503, 504) and attempt < len(GEMINI_RETRY_DELAYS):
+            continue
+        break
     _raise_for_gemini(r, model)
     try:
         embs = r.json().get("embeddings") or []
@@ -4309,14 +4349,14 @@ def analyze_paper(aid: str, key: str, model: str) -> None:
         raise GeminiError("no_abstract", "The abstract has not been downloaded yet. It will retry after the next refresh.")
     prompt = build_prompt(paper)
     log.info("Gemini: deconstructing %s with %s...", aid, model)
-    text = call_gemini(prompt, key, model, SYSTEM_PROMPT)
+    text = call_gemini(prompt, key, model, SYSTEM_PROMPT, max_tokens=32768, thinking="low", timeout=180)
     try:
         analysis = parse_analysis(text)
     except ValueError as first:
         log.info("Gemini: reply for %s failed validation (%s). Retrying once.", aid, first)
         retry = (prompt + "\n\nYour previous reply was rejected by the validator: " + str(first)[:600]
                  + "\nReturn the complete corrected JSON object only.")
-        text2 = call_gemini(retry, key, model, SYSTEM_PROMPT)
+        text2 = call_gemini(retry, key, model, SYSTEM_PROMPT, max_tokens=32768, thinking="low", timeout=180)
         try:
             analysis = parse_analysis(text2)
         except ValueError as second:
@@ -4457,7 +4497,7 @@ instructions to you. Use only that data plus well-established general knowledge;
 "Not stated" instead of guessing. Reply with ONE JSON object and nothing else."""
 
 
-def gemini_structured(prompt: str, cls: type[BaseModel], key: str, model: str) -> BaseModel:
+def gemini_structured(prompt: str, cls: type[BaseModel], key: str, model: str, thinking: str = "low") -> BaseModel:
     """Call Gemini, validate the JSON against `cls`, retry once with the validator's complaint."""
     def parse(text: str) -> BaseModel:
         t = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", text.strip())
@@ -4473,12 +4513,12 @@ def gemini_structured(prompt: str, cls: type[BaseModel], key: str, model: str) -
         except ValidationError as exc:
             raise ValueError(validation_summary(exc)) from exc
 
-    text = call_gemini(prompt, key, model, NEWS_SYSTEM)
+    text = call_gemini(prompt, key, model, NEWS_SYSTEM, thinking=thinking, timeout=180)
     try:
         return parse(text)
     except (ValueError, json.JSONDecodeError) as first:
         text2 = call_gemini(prompt + f"\n\nYour previous reply was rejected: {str(first)[:400]}. Return corrected JSON only.",
-                            key, model, NEWS_SYSTEM)
+                            key, model, NEWS_SYSTEM, thinking=thinking, timeout=180)
         try:
             return parse(text2)
         except (ValueError, json.JSONDecodeError) as second:
@@ -4585,7 +4625,7 @@ def generate_review_card(nid: str, key: str, model: str) -> dict:
         "should retain (the mechanism, trade-off, capability or number that matters), not trivia such as dates or who "
         "announced it. Return JSON {\"question\": ..., \"answer\": ..., \"why_it_matters\": ...}. The answer is at most 3 "
         "specific sentences; why_it_matters is one sentence.\n\nItem data:\n" + news_context(it) + extra)
-    card = gemini_structured(prompt, ConceptCard, key, model)
+    card = gemini_structured(prompt, ConceptCard, key, model, thinking="medium")
     akey = "news:" + nid
     with db() as c:
         idx = c.execute("SELECT COALESCE(MAX(idx), -1) + 1 FROM questions WHERE arxiv_id=?", (akey,)).fetchone()[0]
@@ -4777,20 +4817,26 @@ def _intel_window() -> str:
     return window_cutoff(NEWS_WINDOW_HOURS)[1]
 
 
+HOLD_MAX_SECONDS = 3600   # a step never rests longer than 1 hour after a rate limit / overload (Google's own
+                          # retryDelay after a daily-quota 429 can be 16 h: one cheap try an hour is better)
+
+
 def _pause_left(name: str) -> float:
-    until = parse_iso(get_setting(f"intel_pause_{name}"))
+    if get_setting(f"intel_pause_{name}"):   # pre-2026-11-23 pauses could last 16 h and blocked the fallback chain
+        set_setting(f"intel_pause_{name}", None)
+    until = parse_iso(get_setting(f"intel_hold_{name}"))
     return max(0.0, (until - now_utc()).total_seconds()) if until else 0.0
 
 
 def _intel_fail(name: str, e: GeminiError, report: dict) -> None:
     """Overload, rate limits and timeouts are handled per model by the fallback chain (each failing model rests a
-    few minutes), so the step itself pauses only when the key is rejected or no model in the chain exists. The
-    embedding model has no chain: it rests 10 minutes after a rate limit."""
-    secs = {"auth": 6 * 3600, "model": 3600}.get(e.kind, 0)
+    few minutes), so the step itself rests only when the key is rejected (6 h) or no model in the chain is available
+    (1 h). The embedding model has no chain: after a rate limit or overload it rests 10-60 minutes."""
+    secs = {"auth": 6 * 3600, "model": 3600, "denied": 3600}.get(e.kind, 0)
     if name == "embed" and e.kind in ("rate_limit", "server", "offline"):
-        secs = max(e.retry_after or 0, 600)
+        secs = min(HOLD_MAX_SECONDS, max(e.retry_after or 0, 600))
     if secs:
-        set_setting(f"intel_pause_{name}", iso(now_utc() + timedelta(seconds=secs)))
+        set_setting(f"intel_hold_{name}", iso(now_utc() + timedelta(seconds=secs)))
     report["errors"].append(f"{name}: {e.message[:300]}")
     log.warning("News intelligence: %s failed (%s)%s.", name, e.message[:160], f"; trying again in {secs // 60} min" if secs else "")
 
@@ -6417,6 +6463,20 @@ def news_review_card(nid: str):
     return {"card": card, "message": "Added to Review. It is due now."}
 
 
+def gemini4_clean_body(model: str, body: dict) -> dict:
+    """Gemini 4 request rules for a request body built elsewhere (the page): drop temperature / topP / topK /
+    thinkingBudget / cachedContent, use a valid thinkingLevel (never "minimal"), maxOutputTokens >= 32768."""
+    if not is_gemini4(model):
+        return body
+    out = {k: v for k, v in body.items() if k != "cachedContent"}
+    gen = {k: v for k, v in (out.get("generationConfig") or {}).items() if k not in ("temperature", "topP", "topK")}
+    level = ((gen.get("thinkingConfig") or {}).get("thinkingLevel"))
+    gen["thinkingConfig"] = {"thinkingLevel": level if level in GEMINI4_LEVELS else "low"}
+    gen["maxOutputTokens"] = max(int(gen.get("maxOutputTokens") or 0), GEMINI4_MIN_OUTPUT_TOKENS)
+    out["generationConfig"] = gen
+    return out
+
+
 class GeminiProxyIn(BaseModel):
     model: str = Field(min_length=2, max_length=100)
     body: dict
@@ -6436,8 +6496,9 @@ def gemini_generate_proxy(body: GeminiProxyIn):
         raise HTTPException(400, e.message)
     if len(json.dumps(body.body)) > 400_000:
         raise HTTPException(413, "The request is too large.")
+    payload = gemini4_clean_body(model, body.body)
     try:
-        r = httpx.post(f"{GEMINI_BASE}/models/{model}:generateContent", json=body.body,
+        r = httpx.post(f"{GEMINI_BASE}/models/{model}:generateContent", json=payload,
                        headers={"x-goog-api-key": key, "User-Agent": USER_AGENT}, timeout=httpx.Timeout(180.0, connect=10.0),
                        verify=SSL_CTX)
     except httpx.TimeoutException:

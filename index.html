@@ -1225,7 +1225,7 @@ const gCfg = () => LS.get('gemini', {});
 const gKey = () => gCfg().key || '';
 // The deep model (Triage, Frontier Brief, Review cards, breakdowns). The filter and embedding models run in the
 // website build (GitHub Actions); the page shows which ones in Settings.
-const DEFAULT_DEEP_MODEL = 'gemini-3.8-flash';
+const DEFAULT_DEEP_MODEL = 'gemini-4-hydrogen';
 const OLD_DEFAULT_MODELS = ['gemini-flash-latest'];
 // (the desktop app uses the deep model saved in its own Settings / workbench.db)
 const gModel = () => {
@@ -1269,11 +1269,16 @@ async function listGeminiModels() {
 }
 
 /* --- Shared Gemini helper: every on-demand feature (Triage, Review cards, Frontier Brief, breakdowns) goes through
-   gemRun(). Per request it walks the deep-model chain gemini-3.8-flash -> gemini-3.6-flash -> gemini-3.5-flash-lite
+   gemRun(). Per request it walks the deep-model chain gemini-4-hydrogen -> gemini-3.8-flash -> gemini-3.5-flash-lite
    (then Google's -latest alias as a last resort). On 503 (overloaded), 429 (rate limit / quota) or a timeout it retries
-   the same model after 2 s and 5 s, then steps down. A model that kept failing rests 12 minutes (in this browser), a
-   model that does not exist (404) 6 hours. Requests are counted per model per day (Settings shows the counts). --- */
-const DEEP_FALLBACKS = ['gemini-3.6-flash', 'gemini-3.5-flash-lite'];
+   the same model after 2 s and 5 s, then steps down. A model that kept failing rests 12 minutes (in this browser); a
+   model this key cannot use (404 / 403 / 402) 6 hours. Requests are counted per model per day (Settings shows them).
+   Gemini 4 rules (gemBody): no temperature / topP / topK, never thinkingBudget or thinkingLevel "minimal", an explicit
+   thinkingLevel (Triage and review cards "medium", everything else "low"), maxOutputTokens >= 32768, no cachedContent. --- */
+const DEEP_FALLBACKS = ['gemini-3.8-flash', 'gemini-3.5-flash-lite'];
+const GEMINI4_LEVELS = ['low', 'medium', 'high', 'xhigh'];
+const GEMINI4_MIN_OUTPUT = 32768;
+const isGemini4 = m => /^gemini-4-/.test(m || '');
 const MODEL_COOL_MS = 12 * 60000;
 const GEMINI_TIMEOUT_MS = 150000;
 const hasGeminiKey = () => STATIC ? !!gKey() : !!(app.status && app.status.gemini && app.status.gemini.has_key);
@@ -1297,7 +1302,8 @@ function gemErrFrom(status, data, model) {
   const err = (data && data.error) || {}, msg = String(err.message || (data && data.detail) || '').slice(0, 400);
   if (!STATIC && data && data.detail && !data.error) return new GemErr(/key/i.test(msg) ? 'no_key' : 'bad_output', msg);
   if (status === 429) return new GemErr('rate_limit', `Gemini ${model}: rate limit or free-tier quota reached. ${msg}`);
-  if (status === 401 || status === 403 || (status === 400 && /api key/i.test(msg))) return new GemErr('auth', 'Gemini rejected the API key. ' + msg);
+  if (status === 401 || ((status === 400 || status === 403) && /api.?key/i.test(msg))) return new GemErr('auth', 'Gemini rejected the API key. ' + msg);
+  if (status === 402 || status === 403) return new GemErr('denied', `Gemini ${model} is not available to this key (HTTP ${status}). ${msg}`);
   if (status === 404) return new GemErr('model', `Model '${model}' is not available for this key. ${msg}`);
   if (status === 400 && /thinking/i.test(msg)) return new GemErr('thinking', msg);
   if (status === 400 && /tool|mime|response_?schema|json|not supported|unsupported/i.test(msg)) return new GemErr('unsupported', msg);
@@ -1325,8 +1331,11 @@ async function rawGenerate(model, body) {
 function gemBody(o, model, thinkingOk) {
   const gc = { maxOutputTokens: o.maxTokens || 16384 };
   if (o.schema) { gc.responseMimeType = 'application/json'; gc.responseJsonSchema = o.schema; }
-  else if (!o.tools && o.json !== false) { gc.responseMimeType = 'application/json'; gc.temperature = 0.4; }
-  if (o.thinking && thinkingOk && /^gemini-3/.test(model)) gc.thinkingConfig = { thinkingLevel: o.thinking };
+  else if (!o.tools && o.json !== false) { gc.responseMimeType = 'application/json'; if (!isGemini4(model)) gc.temperature = 0.4; }
+  if (isGemini4(model)) {   // Gemini 4: explicit valid thinkingLevel, room for thinking tokens, no sampling params
+    gc.thinkingConfig = { thinkingLevel: GEMINI4_LEVELS.includes(o.thinking) ? o.thinking : 'low' };
+    gc.maxOutputTokens = Math.max(gc.maxOutputTokens, GEMINI4_MIN_OUTPUT);
+  } else if (o.thinking && thinkingOk && /^gemini-3/.test(model)) gc.thinkingConfig = { thinkingLevel: o.thinking };
   const body = { systemInstruction: { parts: [{ text: o.system }] }, contents: [{ role: 'user', parts: [{ text: o.prompt }] }], generationConfig: gc };
   if (o.tools && o.tools.length) body.tools = o.tools;
   return body;
@@ -1359,8 +1368,8 @@ async function gemRun(o) {
         return { text, model: m, cand, data };
       } catch (e) {
         last = e;
-        if (e.kind === 'thinking' && thinkingOk) { thinkingOk = false; continue; }   // model takes no thinkingLevel
-        if (e.kind === 'model') { markMissing(m); tried.push(`${m} (not available)`); gone = true; break; }
+        if (e.kind === 'thinking' && thinkingOk && !isGemini4(m)) { thinkingOk = false; continue; }   // Gemini 3 model takes no thinkingLevel
+        if (e.kind === 'model' || e.kind === 'denied') { markMissing(m); tried.push(`${m} (not available)`); gone = true; break; }
         if (!['server', 'offline', 'rate_limit'].includes(e.kind)) throw e;
       }
     }
@@ -1617,7 +1626,7 @@ async function sAnalyze(aid) {
   const p = sPaper(aid);
   if (p.analysis) return { status: 'done', message: 'Already analyzed (each paper is analyzed once).' };
   if (!p.abstract || p.abstract.length < 50) throw new Error('This paper has no abstract in the website data yet, so there is nothing to analyze.');
-  const { value, model } = await geminiStructured(analysisPrompt(p), SYSTEM_PROMPT, vAnalysis);
+  const { value, model } = await geminiStructured(analysisPrompt(p), SYSTEM_PROMPT, vAnalysis, null, { thinking: 'low', maxTokens: 32768 });
   const loc = LS.get('analyses', {});
   loc[aid] = { data: value, model, created_at: nowIso() };
   const now = nowIso();
@@ -1716,15 +1725,15 @@ async function runTriage(it, { grounding = false } = {}) {
   const ids = conceptIds(), urls = eventUrls(it), schema = triageSchema(ids), system = TRIAGE_SYSTEM;
   const tools = [{ url_context: {} }, ...(grounding ? [{ google_search: {} }] : [])];
   let r, mode = 'pages', note = null;
-  try { r = await gemRun({ prompt: triagePrompt(it, urls, ids, true), system, schema, tools, thinking: 'low' }); }
+  try { r = await gemRun({ prompt: triagePrompt(it, urls, ids, true), system, schema, tools, thinking: 'medium' }); }
   catch (e) {
     if (e.kind !== 'unsupported') throw e;
     try {   // this model cannot combine tools with a response schema: keep the tools, ask for JSON in the prompt
-      r = await gemRun({ prompt: triagePrompt(it, urls, ids, true) + '\n\nReply with that JSON object only, no other text.', system, tools, thinking: 'low', json: false });
+      r = await gemRun({ prompt: triagePrompt(it, urls, ids, true) + '\n\nReply with that JSON object only, no other text.', system, tools, thinking: 'medium', json: false });
     } catch (e2) {
       if (!['unsupported', 'bad_output'].includes(e2.kind)) throw e2;
       mode = 'snippets'; note = 'This model could not read pages here';
-      r = await gemRun({ prompt: triagePrompt(it, urls, ids, false), system, schema, thinking: 'low' });
+      r = await gemRun({ prompt: triagePrompt(it, urls, ids, false), system, schema, thinking: 'medium' });
     }
   }
   let value;
@@ -1732,7 +1741,7 @@ async function runTriage(it, { grounding = false } = {}) {
   catch (e) {
     if (e instanceof GemErr) throw e;
     mode = 'snippets'; note = 'The first answer was not valid; rewritten from the snippets';
-    r = await gemRun({ prompt: triagePrompt(it, urls, ids, false) + `\n\nA previous reply was rejected: ${String(e.message).slice(0, 200)}. Return corrected JSON only.`, system, schema, thinking: 'low' });
+    r = await gemRun({ prompt: triagePrompt(it, urls, ids, false) + `\n\nA previous reply was rejected: ${String(e.message).slice(0, 200)}. Return corrected JSON only.`, system, schema, thinking: 'medium' });
     value = vTriage(parseJsonReply(r.text));
   }
   const st = mode === 'pages' ? urlStatus(r.cand) : { read: [], failed: [] };
@@ -4172,7 +4181,7 @@ async function renderSettings(ctx) {
         h('div', { class: 'row' }, embedInput, h('button', { class: 'btn', onclick: () => save({ gemini_model_embed: embedInput.value.trim() }, 'Embedding model saved. Events are re-grouped on the next refresh.') }, 'Save')),
         h('div', { class: 'help' }, `Defaults: ${st.default_model_filter} and ${st.default_model_embed} (768 dimensions). Leave a box empty to use its default. A model your key does not have is replaced by gemini-flash-lite-latest / gemini-flash-latest automatically.`)),
       h('div', { class: 'field' }, h('label', { class: 'check' }, fallbackBox, 'When the model is overloaded, rate-limited or not available, step down the fallback chain'),
-        h('div', { class: 'help' }, 'Google sometimes answers "HTTP 503: experiencing high demand" or 429 (rate limit). Each request is retried after 2 s and 5 s, then the next model in the chain answers (filter: gemini-3.5-flash-lite → gemini-3.1-flash-lite → gemini-3.6-flash; deep: gemini-3.8-flash → gemini-3.6-flash → gemini-3.5-flash-lite). A failing model rests 12 minutes, then is used again.')),
+        h('div', { class: 'help' }, 'Google sometimes answers "HTTP 503: experiencing high demand" or 429 (rate limit). Each request is retried after 2 s and 5 s, then the next model in the chain answers (filter: gemini-3.5-flash-lite → gemini-3.1-flash-lite → gemini-3.8-flash; deep: gemini-4-hydrogen → gemini-3.8-flash → gemini-3.5-flash-lite). A busy model rests 12 minutes, then is used again; a model the key cannot use (404 / 403 / 402) is skipped for 6 hours.')),
       geminiActivity(ir.used)),
     intelCard,
     workspaceCard(),
