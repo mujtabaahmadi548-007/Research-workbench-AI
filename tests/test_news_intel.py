@@ -117,6 +117,9 @@ class Drift(unittest.TestCase):
         self.assertFalse(NI.embeddable("model", "Qwen/Qwen3.8-Flash", "A long description of the model and what it does well."))
         self.assertTrue(NI.embeddable("article", "Nvidia's board votes to reinstate Jensen Huang as CEO", ""))
         self.assertTrue(NI.embeddable("discussion", "Show HN: a tiny agent runtime", "It runs agents in microVMs with snapshots."))
+        long_snippet = "GLM-5.4 launches, Inkling 2 Mini ships and the Riemann proof is verified by two groups."
+        self.assertFalse(NI.embeddable("article", "OpenAI publishes progress, Inkling 2 Mini, Riemann proof", long_snippet, "tldr_ai"))
+        self.assertFalse(NI.embeddable("article", "[AINews] Riemann Hypothesis proved...twice independently", long_snippet, "latentspace"))
 
 
 class Scoring(unittest.TestCase):

@@ -4663,7 +4663,7 @@ INTEL_SCORE_BATCH = 40
 INTEL_MAX_SCORE_CALLS = int(os.environ.get("WORKBENCH_INTEL_SCORE_CALLS", "4"))    # per run
 INTEL_MAX_EMBED_CALLS = int(os.environ.get("WORKBENCH_INTEL_EMBED_CALLS", "1"))    # per run (100 texts each)
 INTEL_EMBED_HOURS = 72       # only recent reports are embedded (merging looks 48 h around an event's first report)
-CLUSTER_VERSION = "2"        # bump to re-group every event from the cached vectors (no new Gemini calls)
+CLUSTER_VERSION = "3"        # bump to re-group every event from the cached vectors (no new Gemini calls)
 INTEL_MAX_TRIES = 3          # an item Gemini skips three times keeps its keyword score
 INTEL_CALL_GAP = float(os.environ.get("WORKBENCH_INTEL_CALL_GAP", "4"))   # seconds between calls (free tier RPM)
 _intel_lock = threading.Lock()
@@ -4709,10 +4709,10 @@ def _intel_embed(key: str, model: str, report: dict) -> None:
     since = iso(now_utc() - timedelta(hours=INTEL_EMBED_HOURS))
     with db() as c:
         cands = c.execute(
-            """SELECT n.id, n.kind, n.title, n.summary FROM news n LEFT JOIN news_vectors v ON v.id = n.id AND v.model = ?
+            """SELECT n.id, n.kind, n.source, n.title, n.summary FROM news n LEFT JOIN news_vectors v ON v.id = n.id AND v.model = ?
                WHERE v.id IS NULL AND COALESCE(n.published, n.first_seen) >= ? AND COALESCE(n.ai_relevant, 1) = 1
                AND n.kind IN ('article', 'discussion') ORDER BY n.first_seen DESC LIMIT 2000""", (model, since)).fetchall()
-    rows = [r for r in cands if NI.embeddable(r["kind"], r["title"], r["summary"])][:EMBED_BATCH * INTEL_MAX_EMBED_CALLS]
+    rows = [r for r in cands if NI.embeddable(r["kind"], r["title"], r["summary"], r["source"])][:EMBED_BATCH * INTEL_MAX_EMBED_CALLS]
     for i in range(0, len(rows), EMBED_BATCH):
         chunk = rows[i:i + EMBED_BATCH]
         if i:
@@ -4735,20 +4735,21 @@ def _intel_cluster(model: str, report: dict) -> None:
     thr, span = cluster_threshold(), timedelta(hours=NI.CLUSTER_HOURS)
     with db() as c:
         rows = c.execute(
-            """SELECT n.id, n.event_id, n.kind, n.title, n.summary, n.published, n.first_seen, v.vec FROM news n
+            """SELECT n.id, n.event_id, n.kind, n.source, n.title, n.summary, n.published, n.first_seen, v.vec FROM news n
                JOIN news_vectors v ON v.id = n.id AND v.model = ?
                WHERE COALESCE(n.published, n.first_seen) >= ? AND COALESCE(n.ai_relevant, 1) = 1""",
             (model, _intel_window())).fetchall()
-    rows = [r for r in rows if NI.embeddable(r["kind"], r["title"], r["summary"])]
+    rows = [r for r in rows if NI.embeddable(r["kind"], r["title"], r["summary"], r["source"])]
     todo = sorted((r for r in rows if not r["event_id"]), key=_item_time)
     if not todo:
         return
     events: dict[str, dict] = {}
+    log_rows: list[tuple] = []   # (similarity, merged, item title, event's first title): published for calibration
 
-    def add(eid: str, vec: list[float], t: datetime) -> None:
+    def add(eid: str, vec: list[float], t: datetime, title: str = "") -> None:
         e = events.get(eid)
         if e is None:
-            events[eid] = {"sum": list(vec), "n": 1, "lo": t}
+            events[eid] = {"sum": list(vec), "n": 1, "lo": t, "title": title}
             return
         s = e["sum"]
         for i, x in enumerate(vec):
@@ -4758,22 +4759,27 @@ def _intel_cluster(model: str, report: dict) -> None:
 
     for r in rows:
         if r["event_id"]:
-            add(r["event_id"], NI.unpack_vec(r["vec"]), _item_time(r))
+            add(r["event_id"], NI.unpack_vec(r["vec"]), _item_time(r), r["title"])
     updates = []
     for r in todo:
         vec, t = NI.unpack_vec(r["vec"]), _item_time(r)
-        best, best_sim = None, thr
+        best, best_sim = None, -1.0
         for eid, e in events.items():
             if abs(t - e["lo"]) <= span:
                 s = NI.mean_similarity(vec, e["sum"], e["n"])
-                if s >= best_sim:
+                if s > best_sim:
                     best, best_sim = eid, s
-        if best is None:
+        if best is not None and best_sim >= 0.7:
+            log_rows.append((round(best_sim, 4), best_sim >= thr, r["title"][:110], events[best]["title"][:110]))
+        if best is None or best_sim < thr:
             best = "ev:" + r["id"]
         else:
             report["merged"] += 1
-        add(best, vec, t)
+        add(best, vec, t, r["title"])
         updates.append((best, r["id"]))
+    if log_rows:   # the closest candidates of this run, most similar first (headlines only: public data)
+        log_rows.sort(key=lambda x: -x[0])
+        report["merge_log"] = [list(x) for x in log_rows[:160]]
     with db() as c:
         c.executemany("UPDATE news SET event_id=? WHERE id=? AND event_id IS NULL", updates)
     report["clustered"] += len(updates)

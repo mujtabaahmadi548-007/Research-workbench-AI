@@ -3579,7 +3579,7 @@ function renderSiteSettings(ctx) {
       h('p', { class: 'small', style: { marginTop: 0 } }, 'GitHub Actions runs the news filter on every update, with the website\'s GEMINI_API_KEY secret. It removes stories that are not about AI, picks the category, rates technical and industry impact, and merges reports of the same event.'),
       h('div', { class: 'tblwrap', style: { marginTop: 0 } }, h('table', { class: 'tbl' }, h('tbody', null,
         h('tr', null, h('td', null, 'Filter & scoring model'), h('td', null, h('code', null, im.filter || 'gemini-3.5-flash-lite'))),
-        h('tr', null, h('td', null, 'Embedding model'), h('td', null, h('code', null, im.embed || 'gemini-embedding-001'), ' · 768 dimensions · merge at cosine ≥ ', String((D.intel || {}).threshold || 0.82))),
+        h('tr', null, h('td', null, 'Embedding model'), h('td', null, h('code', null, im.embed || 'gemini-embedding-001'), ' · 768 dimensions · merge at average cosine ≥ ', String((D.intel || {}).threshold || 0.88))),
         h('tr', null, h('td', null, 'Brief model (website build)'), h('td', null, h('code', null, im.deep || DEFAULT_DEEP_MODEL))),
         h('tr', null, h('td', null, 'Last 14 days'), h('td', null, itot.items != null ? `${itot.scored} of ${itot.items} items scored, ${itot.dropped} dropped as not AI, ${itot.events} events` : 'not run yet (needs the GEMINI_API_KEY secret)')),
         gi.at ? h('tr', null, h('td', null, 'Last run'), h('td', null, `${ago(gi.at)}: ${gi.scored || 0} scored, ${gi.embedded || 0} embedded, ${gi.merged || 0} merged by similarity, ${gi.slug_merges || 0} by event slug`,
@@ -3655,7 +3655,7 @@ async function renderSettings(ctx) {
     h('div', { class: 'field' }, h('label', { class: 'check' }, droppedBox, 'Show the items the filter dropped (debug list at the bottom of the News page)')),
     h('div', { class: 'field' }, h('label', null, 'Merge reports of one event at cosine similarity ≥'),
       h('div', { class: 'row' }, thrInput, h('button', { class: 'btn', onclick: () => save({ cluster_threshold: +thrInput.value }, 'Threshold saved. Events are re-grouped on the next refresh (no new Gemini calls).') }, 'Save')),
-      h('div', { class: 'help' }, 'Default 0.82. Higher merges less (fewer false merges, more duplicates).')),
+      h('div', { class: 'help' }, 'Default 0.88 (0.82 merged different stories built from the same template, such as separate funding rounds). Higher merges less: fewer false merges, more duplicates.')),
     h('p', { class: 'small', style: { margin: 0 } }, itot.items != null ? `Last 14 days: ${itot.scored} of ${itot.items} items scored, ${itot.dropped} dropped as not AI, ${itot.embedded} embedded, ${itot.events} events.` : ''),
     ir.at ? h('p', { class: 'small muted', style: { margin: '4px 0 0' } }, `Last run ${ago(ir.at)}: ${ir.scored || 0} scored, ${ir.embedded || 0} embedded, ${ir.merged || 0} merged by similarity, ${ir.slug_merges || 0} by event slug.${ir.waiting ? ' ' + ir.waiting + '.' : ''}${ir.note ? ' ' + ir.note + '.' : ''}`,
       (ir.errors || []).length ? h('span', { style: { color: 'var(--bad)' } }, ' ' + ir.errors.join(' · ')) : null) : null);

@@ -212,9 +212,14 @@ news that just arrived (`news_intel.py` holds the pure parts, `server.intel_step
    alerts), *community* (Hacker News, Lobsters, curated newsletters such as Import AI or ChinAI) or *press*.
 2. **One card per event.** Each new item's `"title. first 280 characters of the snippet"` is embedded with
    `gemini-embedding-001` (`SEMANTIC_SIMILARITY`, 768 dimensions, L2-normalized by the app, cached per item, so
-   nothing is embedded twice). An item joins an event when its cosine similarity to the event's average vector is
-   at least **0.82** and the event's first report is within 48 hours. Items with the same Gemini `event_slug` are
-   merged too. The card's headline comes from the best tier (primary > community > press), then the earliest
+   nothing is embedded twice). A report joins an event when its average cosine similarity to the event's reports is
+   at least **0.88** and the event's first report is within 48 hours. Items with the same Gemini `event_slug` are
+   merged too.
+   - Why 0.88 and not 0.82: on real vectors, 0.82 also merged different stories built from the same template, such
+     as five separate funding rounds. Each build publishes the closest pairs with their similarity in
+     `data.gemini.intel.merge_log`, for tuning.
+   - Short texts, model-hub IDs, repos and newsletter digests are not merged by embeddings, because their vectors
+     look alike. The card's headline comes from the best tier (primary > community > press), then the earliest
    report. The other outlets appear as pills: **+5 sources: Nvidia Newsroom · Techmeme · The Decoder …**
 3. **Batched scoring.** One `gemini-3.5-flash-lite` call (Structured Outputs) scores 30–50 new items at a time.
    It sends a batch when 30 items are waiting, or 20 minutes after the oldest one arrived, so quiet builds make no
