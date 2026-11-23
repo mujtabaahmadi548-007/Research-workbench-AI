@@ -22,7 +22,7 @@ on:
         default: true
   push:
     branches: [main]
-    paths: ["index.html", "server.py", "build_site.py", "requirements.txt", ".github/workflows/update-site.yml"]
+    paths: ["index.html", "server.py", "news_intel.py", "build_site.py", "requirements.txt", ".github/workflows/update-site.yml"]
 
 permissions:
   contents: read
@@ -71,6 +71,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKBENCH_GEMINI_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # Optional repository variables (Settings -> Secrets and variables -> Actions -> Variables) to change the
+          # Gemini models without code. Empty = the defaults in server.py (filter gemini-3.5-flash-lite, embeddings
+          # gemini-embedding-001, deep gemini-3.8-flash).
+          WORKBENCH_MODEL_FILTER: ${{ vars.GEMINI_MODEL_FILTER }}
+          WORKBENCH_MODEL_EMBED: ${{ vars.GEMINI_MODEL_EMBED }}
+          WORKBENCH_MODEL_DEEP: ${{ vars.GEMINI_MODEL_DEEP }}
           # X page (optional): secret X_API_KEY = an X API bearer token, or a twitterapi.io key with the repository
           # variable X_API_PROVIDER = twitterapi. Optional variables: X_DAILY_CAP (posts per day, default 100) and
           # X_ACCOUNTS ("AnthropicAI:lab, karpathy:people, ...").

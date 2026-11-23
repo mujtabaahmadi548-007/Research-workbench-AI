@@ -213,11 +213,11 @@ news that just arrived (`news_intel.py` holds the pure parts, `server.intel_step
 2. **One card per event.** Each new item's `"title. first 280 characters of the snippet"` is embedded with
    `gemini-embedding-001` (`SEMANTIC_SIMILARITY`, 768 dimensions, L2-normalized by the app, cached per item, so
    nothing is embedded twice). A report joins an event when its average cosine similarity to the event's reports is
-   at least **0.88** and the event's first report is within 48 hours. Items with the same Gemini `event_slug` are
-   merged too.
-   - Why 0.88 and not 0.82: on real vectors, 0.82 also merged different stories built from the same template, such
-     as five separate funding rounds. Each build publishes the closest pairs with their similarity in
-     `data.gemini.intel.merge_log`, for tuning.
+   at least **0.885** and the event's first report is within 48 hours. Items with the same Gemini `event_slug` are
+   merged too (the slugs of the last 48 hours are reused, so paraphrased headlines of one event get one slug).
+   - Why 0.885 and not 0.82: 0.82 merged separate funding rounds into one card. In the live log of real vectors,
+     every pair at 0.887 or above was the same event, and the closest pair of *different* stories was 0.879. Each
+     build publishes its closest pairs with their similarity in `data.gemini.intel.merge_log`, for re-tuning.
    - Short texts, model-hub IDs, repos and newsletter digests are not merged by embeddings, because their vectors
      look alike. The card's headline comes from the best tier (primary > community > press), then the earliest
    report. The other outlets appear as pills: **+5 sources: Nvidia Newsroom · Techmeme · The Decoder …**
@@ -246,6 +246,71 @@ The website build uses the same defaults, which the environment variables `WORKB
 replaced by `gemini-flash-latest` or `gemini-flash-lite-latest` and remembered for 6 hours. The desktop app first
 copies the website's results (`intel.json`), so the free quota is not spent twice.
 
+### Gemini fallback chains (503 / 429 / timeouts)
+
+Every Gemini request walks a chain. When a model answers 503 (overloaded), 429 (rate limit or quota) or times out,
+the same model is retried after 2 s and then 5 s, and after that the next model in the chain is tried:
+
+| Task | Chain |
+| --- | --- |
+| News filter / scoring | `gemini-3.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-3.6-flash` |
+| Frontier Brief, Triage, Review cards, breakdowns | `gemini-3.8-flash` → `gemini-3.6-flash` → `gemini-3.5-flash-lite` |
+
+Google's `-latest` alias for the same family is the last resort in both chains.
+
+- **Overloaded or rate-limited models** rest about 12 minutes, then are used again.
+- **Models that don't exist for the key** (HTTP 404) are skipped for 6 hours.
+- **Thinking level:** scoring, the brief and Triage send `thinkingConfig.thinkingLevel: "low"` to Gemini 3 models, so
+  GitHub Actions runs don't time out.
+- **Where you see the outcome:** the model that actually answered is shown in Settings and published in `intel.json`
+  (`used`).
+
+The website build takes its three models from the optional repository variables `GEMINI_MODEL_FILTER`,
+`GEMINI_MODEL_EMBED` and `GEMINI_MODEL_DEEP` (GitHub → Settings → Secrets and variables → Actions → Variables).
+Left empty, the defaults above apply.
+
+### Triage, Review cards and the Evolution graph (on demand, with your key)
+
+- **✨ Triage** opens a drawer. Gemini reads the event's own pages with the `url_context` tool: the lead report plus up
+  to two other reports. It returns:
+  - *what changed*;
+  - the *key benchmarks or claims*;
+  - a *hype check & caveats*;
+  - a *builder takeaway*;
+  - 1–3 *suggested review cards*;
+  - for real model releases, architectures and landmark papers, an *Evolution graph edge*.
+
+  If no page can be read (paywall, block), it works from the feeds' snippets and says **Analyzed from snippets
+  (source blocked/paywalled)**. **Search Grounding** (Google Search) is an optional toggle, off by default because the
+  free tier usually has no grounding quota.
+- **+ Review (SM-2)** opens the suggested cards with checkboxes, so you keep only the ones you want. Without a key it
+  saves one quick headline card instead.
+- **+ Add to Evolution Graph** places the model or architecture at its concept in the graph. Entities are matched by
+  name, so adding one twice updates it.
+- **On the website** these calls go from your browser to Google with your browser-stored key. **In the desktop app**
+  they go through the local server, which adds the key from `workbench.db`.
+
+### Storage, export and import
+
+- **What goes where:** small preferences and the API key stay in `localStorage`. Growing data lives in the browser's
+  IndexedDB: read marks, Triage reports, review cards and their SM-2 state, breakdowns, Evolution graph additions and
+  the browser-written brief.
+- **Migration:** the first start moves your old `wb.*` data across automatically. The old copies are removed only
+  after IndexedDB has confirmed the write.
+- **Export / Import:** Settings → **Export Workspace JSON** / **Import Workspace JSON** backs this data up or moves it
+  to another device. The API key is never exported; the export refuses to run if a key would end up in the file.
+
+### Source health and the "Notable & Major" view
+
+- **Health pill:** the top of the News page shows one pill, e.g. `● 63/67 feeds · 5m ago`. Clicking it opens every
+  source and every feed with its status.
+- **Substack feeds:** `*.substack.com` throttles GitHub's shared runners, so those feeds are read at most every
+  30 minutes. After a 403/429 a feed backs off: 30 min, 1 h, 2 h, at most 4 h. A feed that worked within the last
+  day shows **waiting**, not failing.
+- **Notable & Major by default:** the News list opens on **Notable & Major**: events scored 50+ by the Gemini filter
+  or, until it has scored them, events with a keyword score of 35+ or 3+ outlets. **All (incl. Low)** shows
+  everything.
+
 ### Working with the News page
 
 - **Today's Frontier Brief** (top of the page): Gemini (the deep model, Structured Outputs) reads today's top
@@ -257,8 +322,10 @@ copies the website's results (`intel.json`), so the free quota is not spent twic
   - any new Notable event arrives and the brief is 3 hours old;
   - the brief is 12 hours old.
 
-  Major stories that arrive after the brief was written show on top as **Breaking since this brief**. Without a
-  key you get automatic picks per section.
+  Major stories that arrive after the brief was written show on top as **Breaking since this brief**. When Notable or
+  Major events started after the brief, its header shows **Brief outdated · N major updates since HH:MM**, with a
+  **Regenerate** button that rewrites it right away (in the browser with your key, or by the desktop server). Without
+  a key you get automatic picks per section.
 - **Fresh drops only (<14 days)** is on by default for Trending and Latest, so months-old models with huge
   lifetime download counts don't bury this week's releases. Most important shows everything.
 - **Unread / New since last visit / Mark current view as seen** keep track of what you have read

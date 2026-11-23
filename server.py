@@ -436,7 +436,9 @@ NEWS_EXTRA_COLUMNS = {
     "event_id": "TEXT",                           # reports of one event share this id ("ev:<first item id>")
 }
 QUESTION_EXTRA_COLUMNS = {"news_id": "TEXT"}
-NEWS_SOURCES_EXTRA_COLUMNS = {"etag": "TEXT", "last_modified": "TEXT"}   # conditional GET (feeds are polled often)
+NEWS_SOURCES_EXTRA_COLUMNS = {"etag": "TEXT", "last_modified": "TEXT",    # conditional GET (feeds are polled often)
+                              "next_attempt": "TEXT",                       # slow hosts / back-off after 403 or 429
+                              "fail_count": "INTEGER NOT NULL DEFAULT 0"}
 XPOSTS_EXTRA_COLUMNS = {"network": "TEXT NOT NULL DEFAULT 'x'",          # 'x' or 'bsky'
                         "via": "TEXT"}                                   # X: api | hn | bsky | news | gemini
 SCORE_VERSION = "2"
@@ -2028,8 +2030,24 @@ def set_news_source(key: str, name: str, url: str, type_: str, status: str, mess
             (key, name, url, type_, status, message, items, now, now if status == "ok" else None))
 
 
+# Substack (*.substack.com) answers 403 when a feed is read every few minutes from GitHub's shared runners. Its
+# newsletters post about once a day, so those feeds are read at most every 30 minutes, and after a 403/429 every
+# feed backs off (30 min, 1 h, 2 h, at most 4 h) instead of being hit again on the next 5-minute update.
+SLOW_FEED_HOSTS = re.compile(r"(^|\.)substack\.com$", re.I)
+SLOW_FEED_MINUTES = 30
+FEED_BACKOFF_MAX_MIN = 240
+
+
+def _feed_interval_min(url: str) -> int:
+    return SLOW_FEED_MINUTES if SLOW_FEED_HOSTS.search(urlparse(url).hostname or "") else 0
+
+
 def _fetch_one_feed(feed: tuple[str, str, str, str]) -> tuple[int, int]:
     key, name, url, type_ = feed
+    with db() as c:
+        sched = c.execute("SELECT next_attempt, fail_count, items, last_success, url FROM news_sources WHERE key=?", (key,)).fetchone()
+    if sched and sched["url"] == url and sched["next_attempt"] and (parse_iso(sched["next_attempt"]) or now_utc()) > now_utc():
+        return sched["items"] or 0, 0   # resting (slow host or back-off): keep the stored items and status
     try:
         with db() as c:   # conditional GET: an unchanged feed answers "304 Not Modified" with no body
             prev = c.execute("SELECT etag, last_modified, items, url FROM news_sources WHERE key=?", (key,)).fetchone()
@@ -2043,6 +2061,7 @@ def _fetch_one_feed(feed: tuple[str, str, str, str]) -> tuple[int, int]:
             r = cl.get(url)
             if r.status_code == 304:
                 set_news_source(key, name, url, type_, "ok", f"{prev['items']} recent items (no change)", prev["items"])
+                _feed_schedule(key, url, ok=True)
                 return prev["items"] or 0, 0
             r.raise_for_status()
         with db() as c:
@@ -2066,13 +2085,38 @@ def _fetch_one_feed(feed: tuple[str, str, str, str]) -> tuple[int, int]:
                     "title": e["title"], "url": e["url"], "summary": e["summary"], "image": e["image"],
                     "author": e["author"], "published": e["published"]})
         set_news_source(key, name, url, type_, "ok", f"{len(fresh)} recent items ({new} new)", len(fresh))
+        _feed_schedule(key, url, ok=True)
         return len(fresh), new
     except Exception as exc:
         status, msg = describe_http_error(exc)
         if isinstance(exc, ET.ParseError):
             status, msg = "error", "The feed is not valid RSS/Atom XML"
+        code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+        if code in (403, 429):
+            # The host is limiting how often it is read (Substack does this to GitHub's shared runners). Rest with a
+            # growing back-off; a feed that worked within the last day keeps its items and shows "waiting".
+            wait = _feed_schedule(key, url, ok=False)
+            last_ok = parse_iso(sched["last_success"]) if sched else None
+            if last_ok and now_utc() - last_ok < timedelta(hours=24):
+                set_news_source(key, name, url, type_, "waiting",
+                                f"The site limits frequent reads (HTTP {code}); last read {fmt_utc(sched['last_success'])}, "
+                                f"next try in {wait} min", sched["items"])
+                return sched["items"] or 0, 0
+            msg += f"; next try in {wait} min"
         set_news_source(key, name, url, type_, status, msg)
         return -1, 0
+
+
+def _feed_schedule(key: str, url: str, ok: bool) -> int:
+    """After a read: slow hosts rest SLOW_FEED_MINUTES. After a 403/429: rest 30 min, then 1 h, 2 h, at most 4 h.
+    Returns the rest in minutes."""
+    with db() as c:
+        row = c.execute("SELECT fail_count FROM news_sources WHERE key=?", (key,)).fetchone()
+        fails = 0 if ok else ((row["fail_count"] if row else 0) or 0) + 1
+        minutes = _feed_interval_min(url) if ok else min(FEED_BACKOFF_MAX_MIN, 30 * 2 ** (fails - 1))
+        nxt = iso(now_utc() + timedelta(minutes=minutes)) if minutes else None
+        c.execute("UPDATE news_sources SET next_attempt=?, fail_count=? WHERE key=?", (nxt, fails, key))
+    return minutes
 
 
 def _date_undated(key: str, entries: list[dict]) -> list[dict]:
@@ -3908,22 +3952,8 @@ def _raise_for_gemini(resp: httpx.Response, model: str) -> None:
     raise GeminiError("bad_output", f"Gemini refused the request (HTTP {code}). {msg}")
 
 
-GEMINI_RETRY_DELAYS = (2.0, 6.0)        # waits before the 2nd and 3rd try when Gemini is busy (5xx)
-_FALLBACK_SKIP = re.compile(r"image|tts|audio|live|embed|vision|robotics|computer-use|native", re.I)
-_model_cache: dict[str, Any] = {"at": 0.0, "key": None, "models": []}
+GEMINI_RETRY_DELAYS = (2.0, 5.0)        # short backoff on the same model (503 / 429 / timeout) before stepping down
 _gemini_used = threading.local()
-
-
-def pick_fallback_model(key: str, current: str) -> Optional[str]:
-    """Another text Flash model this key can use (from Google's own model list, cached for 6 hours)."""
-    if _model_cache["key"] != key[-8:] or time.time() - _model_cache["at"] > 6 * 3600:
-        try:
-            _model_cache.update(models=list_gemini_models(key), at=time.time(), key=key[-8:])
-        except GeminiError:
-            return None
-    options = [m for m in _model_cache["models"] if m != current and "flash" in m and not _FALLBACK_SKIP.search(m)]
-    options.sort(key=lambda n: ("latest" not in n, "preview" in n or "exp" in n, "lite" in n, n))
-    return options[0] if options else None
 
 
 def gemini_model_used(default: str) -> str:
@@ -3971,70 +4001,121 @@ def model_alias(model: str) -> Optional[str]:
     return alias if alias != model else None
 
 
-def call_gemini(prompt: str, key: str, model: str, system: str, schema: Optional[dict] = None,
-                max_tokens: int = 16384, temperature: Optional[float] = 0.4, timeout: Optional[float] = None) -> str:
-    """Gemini with retries: busy/5xx answers are retried with backoff, then one try on a fallback Flash model.
-    A model ID that does not exist (404) is replaced by its '-latest' alias (see model_alias). `schema` turns on
-    Structured Outputs (generationConfig.responseJsonSchema)."""
-    model = clean_model_name(model)
+# Per-request fallback chains. On 503 (overloaded / UNAVAILABLE), 429 (rate limit or quota) or a timeout, the same
+# model is retried after 2 s and 5 s, then the next model in the chain is tried. A model that kept failing is skipped
+# for MODEL_COOLDOWN only (it is used again once capacity clears); a model that does not exist (404) for 6 hours.
+FILTER_CHAIN = ["gemini-3.1-flash-lite", "gemini-3.6-flash"]     # after the filter model (gemini-3.5-flash-lite)
+DEEP_CHAIN = ["gemini-3.6-flash", "gemini-3.5-flash-lite"]       # after the deep model (gemini-3.8-flash)
+MODEL_COOLDOWN = 12 * 60
+_THINKING_LEVEL_MODELS = re.compile(r"^gemini-3")   # thinkingConfig.thinkingLevel is a Gemini 3 setting
+_no_thinking: set[str] = set()                      # models that rejected thinkingConfig (sent without it after that)
+
+
+def model_chain(model: str, kind: str = "deep") -> list[str]:
+    """The models tried for one request, in order: the configured model, the chain for its kind, and as a last
+    resort Google's '-latest' alias for that family."""
+    rest = FILTER_CHAIN if kind == "filter" else DEEP_CHAIN
+    chain = [model] + [m for m in rest if m != model]
     alias = model_alias(model)
-    if alias and _model_missing(model):
-        model = alias
-    gen = {"schema": schema, "max_tokens": max_tokens, "temperature": temperature, "timeout": timeout}
+    if alias and alias not in chain:
+        chain.append(alias)
+    return chain
+
+
+def note_model_used(task: str, used: str, configured: str) -> None:
+    """Remember which model actually answered each task (shown in Settings and published in intel.json)."""
+    try:
+        cur = json.loads(get_setting("intel_used") or "{}") or {}
+    except ValueError:
+        cur = {}
+    cur[task] = {"model": used, "configured": configured, "fallback": used != configured, "at": iso()}
+    set_setting("intel_used", json.dumps(cur))
+
+
+def models_used() -> dict:
+    try:
+        return json.loads(get_setting("intel_used") or "{}") or {}
+    except ValueError:
+        return {}
+
+
+def _cooldowns() -> dict[str, float]:
+    try:
+        cur = json.loads(get_setting("intel_model_cooldown") or "{}") or {}
+    except ValueError:
+        cur = {}
+    now = time.time()
+    return {m: float(t) for m, t in cur.items() if isinstance(t, (int, float)) and float(t) > now}
+
+
+def _cooling(model: str) -> float:
+    return max(0.0, _cooldowns().get(model, 0.0) - time.time())
+
+
+def _cool(model: str, secs: float = MODEL_COOLDOWN) -> None:
+    cur = _cooldowns()
+    cur[model] = time.time() + secs
+    set_setting("intel_model_cooldown", json.dumps(cur))
+
+
+def call_gemini(prompt: str, key: str, model: str, system: str, schema: Optional[dict] = None,
+                max_tokens: int = 16384, temperature: Optional[float] = 0.4, timeout: Optional[float] = None,
+                kind: str = "deep", thinking: Optional[str] = None) -> str:
+    """One Gemini request with the fallback chain (see model_chain): retries the same model after 2 s and 5 s on
+    503 / 429 / timeouts, then steps down the chain. `schema` turns on Structured Outputs
+    (generationConfig.responseJsonSchema); `thinking` sets thinkingConfig.thinkingLevel on Gemini 3 models.
+    gemini_model_used() tells which model answered."""
+    model = clean_model_name(model)
+    chain = model_chain(model, kind) if get_setting("gemini_fallback") != "0" else [model]
+    chain = [m for m in chain if not _model_missing(m)] or [model]
+    ready = [m for m in chain if not _cooling(m)]
+    if not ready:
+        wait = min(_cooling(m) for m in chain)
+        raise GeminiError("server", f"Every model in the chain ({', '.join(chain)}) failed in the last few minutes; "
+                                    f"the next try is in about {max(1, round(wait / 60))} min.", wait)
+    gen = {"schema": schema, "max_tokens": max_tokens, "temperature": temperature, "timeout": timeout, "thinking": thinking}
+    tried: list[str] = []
     last: Optional[GeminiError] = None
-    for attempt, delay in enumerate((0.0, *GEMINI_RETRY_DELAYS)):
-        if delay:
-            wait = min(15.0, max(delay, (last.retry_after or 0) if last else 0))
-            log.info("Gemini: %s is busy; retrying in %.0f s (try %d of %d).", model, wait, attempt + 1, len(GEMINI_RETRY_DELAYS) + 1)
-            time.sleep(wait)
-        try:
-            text = _gemini_once(prompt, key, model, system, **gen)
-            _gemini_used.value = model
-            return text
-        except GeminiError as e:
-            if e.kind == "model" and alias and model != alias and get_setting("gemini_fallback") != "0":
-                _mark_model_missing(model)
-                log.warning("Gemini: model %s is not available for this key; using %s instead.", model, alias)
-                model = alias
-                try:
-                    text = _gemini_once(prompt, key, model, system, **gen)
-                    _gemini_used.value = model
-                    return text
-                except GeminiError as e2:
-                    e = e2
-            if e.kind != "server":
-                raise e
-            last = e
-    # Still overloaded: first the model's own alias (Flash-Lite work stays on Flash-Lite), then another Flash model
-    fallbacks: list[str] = []
-    if get_setting("gemini_fallback") != "0":
-        if alias and alias != model:
-            fallbacks.append(alias)
-        other = pick_fallback_model(key, model)
-        if other and other not in fallbacks and other != model:
-            fallbacks.append(other)
-    for fallback in fallbacks:
-        log.info("Gemini: %s is still overloaded; trying %s instead.", model, fallback)
-        try:
-            text = _gemini_once(prompt, key, fallback, system, **gen)
-            _gemini_used.value = fallback
-            return text
-        except GeminiError as e:
-            if e.kind not in ("server", "model"):
-                raise
-    tried = f" and also tried {', '.join(fallbacks)}" if fallbacks else ""
-    raise GeminiError("server", f"{last.message} The app retried {len(GEMINI_RETRY_DELAYS)} times{tried}. This is a temporary "
-                                "problem on Google's side: try again in a few minutes, or pick another model in Settings.",
-                      last.retry_after)
+    for m in ready:
+        for attempt, delay in enumerate((0.0, *GEMINI_RETRY_DELAYS)):
+            if delay:
+                log.info("Gemini: %s is busy (%s); retrying in %.0f s.", m, last.kind if last else "?", delay)
+                time.sleep(delay)
+            try:
+                text = _gemini_once(prompt, key, m, system, **gen)
+                _gemini_used.value = m
+                if m != model:
+                    log.info("Gemini: %s answered instead of %s (fallback chain).", m, model)
+                return text
+            except GeminiError as e:
+                last = e
+                if e.kind == "model":
+                    _mark_model_missing(m)
+                    tried.append(f"{m} (not available)")
+                    break
+                if e.kind not in ("server", "offline", "rate_limit"):
+                    raise
+        else:   # still failing after the retries: skip this model for a few minutes and step down the chain
+            _cool(m)
+            tried.append(f"{m} ({'rate limited' if last and last.kind == 'rate_limit' else 'overloaded' if last and last.kind == 'server' else 'timed out'})")
+            log.warning("Gemini: %s failed 3 times (%s); trying the next model.", m, (last.message if last else "")[:120])
+    if last is None:
+        raise GeminiError("server", "Gemini could not be reached.")
+    kind_out = "model" if all("not available" in t for t in tried) else last.kind
+    raise GeminiError(kind_out, f"{last.message} Tried: {', '.join(tried)}. This is usually temporary on Google's side; "
+                                "the next try starts by itself.", last.retry_after)
 
 
 def _gemini_once(prompt: str, key: str, model: str, system: str, schema: Optional[dict] = None,
-                 max_tokens: int = 16384, temperature: Optional[float] = 0.4, timeout: Optional[float] = None) -> str:
+                 max_tokens: int = 16384, temperature: Optional[float] = 0.4, timeout: Optional[float] = None,
+                 thinking: Optional[str] = None) -> str:
     gen: dict[str, Any] = {"responseMimeType": "application/json", "maxOutputTokens": max_tokens}
     if temperature is not None:
         gen["temperature"] = temperature
     if schema is not None:
         gen["responseJsonSchema"] = schema
+    if thinking and _THINKING_LEVEL_MODELS.match(model) and model not in _no_thinking:
+        gen["thinkingConfig"] = {"thinkingLevel": thinking}
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
@@ -4049,6 +4130,10 @@ def _gemini_once(prompt: str, key: str, model: str, system: str, schema: Optiona
         raise GeminiError("offline", "Gemini did not answer in time.") from exc
     except httpx.HTTPError as exc:
         raise GeminiError("offline", f"Could not reach Gemini. {describe_http_error(exc)[1]}.") from exc
+    if r.status_code == 400 and "thinkingConfig" in gen and "thinking" in r.text.lower():
+        _no_thinking.add(model)   # this model does not take thinkingLevel: send the request without it
+        log.info("Gemini: %s does not accept thinkingLevel; retrying without it.", model)
+        return _gemini_once(prompt, key, model, system, schema, max_tokens, temperature, timeout, None)
     _raise_for_gemini(r, model)
     try:
         data = r.json()
@@ -4577,12 +4662,13 @@ def generate_frontier_brief(key: str, model: str) -> tuple[dict, str]:
                     "summary": g.get("summary")})
     prompt = NI.brief_prompt(evs)
     text = call_gemini(prompt, key, model, NI.BRIEF_SYSTEM, schema=NI.BRIEF_SCHEMA, max_tokens=16384, temperature=None,
-                       timeout=180)
+                       timeout=180, kind="deep", thinking="low")
     try:
         data = NI.validate_brief(_json_reply(text), keys)
     except ValueError as first:
         text = call_gemini(prompt + f"\n\nYour previous reply was rejected: {str(first)[:300]}. Return corrected JSON only.",
-                           key, model, NI.BRIEF_SYSTEM, schema=NI.BRIEF_SCHEMA, max_tokens=16384, temperature=None, timeout=180)
+                           key, model, NI.BRIEF_SYSTEM, schema=NI.BRIEF_SCHEMA, max_tokens=16384, temperature=None, timeout=180,
+                           kind="deep", thinking="low")
         try:
             data = NI.validate_brief(_json_reply(text), keys)
         except ValueError as second:
@@ -4663,7 +4749,7 @@ INTEL_SCORE_BATCH = 40
 INTEL_MAX_SCORE_CALLS = int(os.environ.get("WORKBENCH_INTEL_SCORE_CALLS", "4"))    # per run
 INTEL_MAX_EMBED_CALLS = int(os.environ.get("WORKBENCH_INTEL_EMBED_CALLS", "1"))    # per run (100 texts each)
 INTEL_EMBED_HOURS = 72       # only recent reports are embedded (merging looks 48 h around an event's first report)
-CLUSTER_VERSION = "3"        # bump to re-group every event from the cached vectors (no new Gemini calls)
+CLUSTER_VERSION = "4"        # bump to re-group every event from the cached vectors (no new Gemini calls)
 INTEL_MAX_TRIES = 3          # an item Gemini skips three times keeps its keyword score
 INTEL_CALL_GAP = float(os.environ.get("WORKBENCH_INTEL_CALL_GAP", "4"))   # seconds between calls (free tier RPM)
 _intel_lock = threading.Lock()
@@ -4697,10 +4783,16 @@ def _pause_left(name: str) -> float:
 
 
 def _intel_fail(name: str, e: GeminiError, report: dict) -> None:
-    secs = {"rate_limit": max(e.retry_after or 0, 600), "auth": 6 * 3600, "model": 3600}.get(e.kind, 300)
-    set_setting(f"intel_pause_{name}", iso(now_utc() + timedelta(seconds=secs)))
-    report["errors"].append(f"{name}: {e.message[:220]}")
-    log.warning("News intelligence: %s failed (%s); trying again in %d min.", name, e.message[:160], secs // 60)
+    """Overload, rate limits and timeouts are handled per model by the fallback chain (each failing model rests a
+    few minutes), so the step itself pauses only when the key is rejected or no model in the chain exists. The
+    embedding model has no chain: it rests 10 minutes after a rate limit."""
+    secs = {"auth": 6 * 3600, "model": 3600}.get(e.kind, 0)
+    if name == "embed" and e.kind in ("rate_limit", "server", "offline"):
+        secs = max(e.retry_after or 0, 600)
+    if secs:
+        set_setting(f"intel_pause_{name}", iso(now_utc() + timedelta(seconds=secs)))
+    report["errors"].append(f"{name}: {e.message[:300]}")
+    log.warning("News intelligence: %s failed (%s)%s.", name, e.message[:160], f"; trying again in {secs // 60} min" if secs else "")
 
 
 def _intel_embed(key: str, model: str, report: dict) -> None:
@@ -4839,10 +4931,11 @@ def _intel_score(key: str, model: str, report: dict, min_age_minutes: float = 0,
                           "tier": r["source_tier"] or NI.source_tier(r["source_type"], r["source"], r["url"]),
                           "kind": r["kind"], "points": m.get("points") if isinstance(m.get("points"), int) else None})
         text = call_gemini(NI.score_prompt(items, known), key, model, NI.SCORE_SYSTEM, schema=NI.SCORE_SCHEMA,
-                           max_tokens=32768, temperature=None)
+                           max_tokens=32768, temperature=None, kind="filter", thinking="low", timeout=150)
         used = gemini_model_used(model)
         report["calls"] += 1
         report.setdefault("used", {})["filter"] = used
+        note_model_used("filter", used, model)
         try:
             scores = NI.validate_scores(_json_reply(text), [r["id"] for r in batch])
         except ValueError:
@@ -4975,7 +5068,8 @@ def intel_snapshot() -> dict:
         rows = c.execute("""SELECT id, ai_relevant, llm_category, tech_impact, industry_impact, event_slug, why_line,
                                    event_id, scored_at, scored_model FROM news
                             WHERE scored_at IS NOT NULL AND COALESCE(published, first_seen) >= ?""", (_intel_window(),)).fetchall()
-    return {"models": intel_models(), "items": {r["id"]: [r["ai_relevant"], r["llm_category"], r["tech_impact"], r["industry_impact"],
+    return {"models": intel_models(), "used": models_used(), "cooldowns": {m: iso(datetime.fromtimestamp(t, timezone.utc)) for m, t in _cooldowns().items()},
+            "items": {r["id"]: [r["ai_relevant"], r["llm_category"], r["tech_impact"], r["industry_impact"],
                                                          r["event_slug"], r["why_line"], r["event_id"], r["scored_at"], r["scored_model"]]
                                                 for r in rows}}
 
@@ -6149,7 +6243,7 @@ def window_cutoff(hours: Optional[int]) -> tuple[int, str]:
 
 @app.get("/api/news")
 def list_news(q: str = "", category: str = "all", kind: str = "all", sort: str = "trending",
-              view: str = "all", window: int = NEWS_WINDOW_HOURS, limit: int = 48, offset: int = 0):
+              view: str = "all", window: int = NEWS_WINDOW_HOURS, limit: int = 48, offset: int = 0, level: str = "all"):
     limit, offset = max(1, min(limit, 200)), max(0, offset)
     joins, where, params = "", [], []
     fts = fts_query(q) if q.strip() else ""
@@ -6183,7 +6277,7 @@ def list_news(q: str = "", category: str = "all", kind: str = "all", sort: str =
         "relevance": "f.rank" if fts else f"{when} DESC",
     }.get(sort, f"{when} DESC")
     where_sql = ("WHERE " + " AND ".join(where)) if where else ""
-    row_cap = min(800, (offset + limit) * 4)
+    row_cap = 800 if level == "notable" else min(800, (offset + limit) * 4)
     try:
         with db() as c:
             rows = c.execute(f"SELECT n.* FROM news n {joins} {where_sql} ORDER BY {order} LIMIT ?",
@@ -6198,12 +6292,28 @@ def list_news(q: str = "", category: str = "all", kind: str = "all", sort: str =
     except sqlite3.OperationalError as exc:
         raise HTTPException(400, f"Search could not be run: {exc}")
     groups = group_stories([_news_out(r) for r in rows])
-    if sort == "trending" and kind == "all" and not fts and category in ("all", "model_release"):
+    all_groups = len(groups)
+    if level == "notable":   # "Notable & Major": high-signal events only (see notable_event)
+        groups = [g for g in groups if notable_event(g)]
+    if sort == "trending" and kind == "all" and not fts and category in ("all", "model_release") and level != "notable":
         groups = ensure_model_slots(groups)
     return {"items": groups[offset:offset + limit], "more": len(groups) > offset + limit or len(rows) == row_cap,
+            "level": level, "events_all_levels": all_groups,
             "shown_events": len(groups[:offset + limit]), "total_items": total_items, "fresh": True, "window_hours": hours,
             "unread": unread, "new_since_visit": new_since, "last_visit": prev,
             "category_counts": counts, "categories": NEWS_CATEGORIES}
+
+
+NOTABLE_KEYWORD_SCORE = 35   # events Gemini has not scored yet: the keyword score is on a lower scale
+
+
+def notable_event(g: dict) -> bool:
+    """'Notable & Major' view: Gemini-scored events at 50+, or (not scored yet) a keyword score of 35+ or 3+ outlets."""
+    ip = g.get("importance_parts") or {}
+    if ip.get("mode") == "gemini":
+        return (g.get("importance") or 0) >= NI.TIER_NOTABLE
+    outlets = {g.get("source_name")} | {r.get("source_name") for r in g.get("related") or []}
+    return (g.get("importance") or 0) >= NOTABLE_KEYWORD_SCORE or len(outlets) >= 3 or bool((g.get("metrics") or {}).get("alert"))
 
 
 def dropped_items(hours: int = 72, limit: int = 150) -> list[dict]:
@@ -6307,6 +6417,68 @@ def news_review_card(nid: str):
     return {"card": card, "message": "Added to Review. It is due now."}
 
 
+class GeminiProxyIn(BaseModel):
+    model: str = Field(min_length=2, max_length=100)
+    body: dict
+
+
+@app.post("/api/gemini/generate")
+def gemini_generate_proxy(body: GeminiProxyIn):
+    """Desktop app: the page's Gemini features (Triage with url_context, Frontier Brief rewrite) build the request in
+    the browser; the server only adds the key stored in workbench.db and forwards it to generateContent. Only this
+    local server can call it (it listens on 127.0.0.1)."""
+    key = get_setting("gemini_api_key")
+    if not key:
+        raise HTTPException(400, "This needs a Gemini API key. Add one in Settings.")
+    try:
+        model = clean_model_name(body.model)
+    except GeminiError as e:
+        raise HTTPException(400, e.message)
+    if len(json.dumps(body.body)) > 400_000:
+        raise HTTPException(413, "The request is too large.")
+    try:
+        r = httpx.post(f"{GEMINI_BASE}/models/{model}:generateContent", json=body.body,
+                       headers={"x-goog-api-key": key, "User-Agent": USER_AGENT}, timeout=httpx.Timeout(180.0, connect=10.0),
+                       verify=SSL_CTX)
+    except httpx.TimeoutException:
+        return JSONResponse({"error": {"message": "Gemini did not answer in time.", "status": "DEADLINE_EXCEEDED"}}, status_code=504)
+    except httpx.HTTPError as exc:
+        return JSONResponse({"error": {"message": f"Could not reach Gemini. {describe_http_error(exc)[1]}."}}, status_code=502)
+    try:
+        data = r.json()
+    except ValueError:
+        data = {"error": {"message": clean_text(r.text)[:300]}}
+    return JSONResponse(data, status_code=r.status_code)
+
+
+class CardIn(BaseModel):
+    front: str = Field(min_length=3, max_length=600)
+    back: str = Field(min_length=1, max_length=2000)
+    topic: str = Field(default="", max_length=120)
+
+
+class CardsIn(BaseModel):
+    news_id: Optional[str] = Field(default=None, max_length=300)
+    cards: list[CardIn] = Field(min_length=1, max_length=5)
+
+
+@app.post("/api/review/cards")
+def add_review_cards(body: CardsIn):
+    """Desktop app: add the concept cards the user picked in the Triage drawer (or a quick headline card) to Review."""
+    akey = "news:" + (body.news_id or "manual")
+    ids = []
+    with db() as c:
+        for card in body.cards:
+            idx = c.execute("SELECT COALESCE(MAX(idx), -1) + 1 FROM questions WHERE arxiv_id=?", (akey,)).fetchone()[0]
+            cur = c.execute(
+                """INSERT INTO questions (arxiv_id, idx, qtype, prompt, options, answer_index, answer, explanation, due, news_id)
+                   VALUES (?, ?, 'recall', ?, '[]', NULL, ?, ?, ?, ?)""",
+                (akey, idx, card.front.strip(), card.back.strip(), ("Topic: " + card.topic.strip()) if card.topic.strip() else "",
+                 iso(), body.news_id))
+            ids.append(cur.lastrowid)
+    return {"ids": ids, "message": f"Added {len(ids)} card{'s' if len(ids) != 1 else ''} to Review. Due now."}
+
+
 @app.get("/api/news/{nid:path}/quickstart")
 def news_quickstart(nid: str):
     return quickstart_for(_news_item(nid))
@@ -6381,6 +6553,7 @@ def _write_brief(key: str, model: str) -> tuple[dict, str]:
             set_setting("brief_fail_msg", e.message[:400])
         raise
     set_setting("brief_fail_at", None)
+    note_model_used("brief", used, model)
     log.info("Gemini: wrote Today's Frontier Brief (%s).", used)
     return data, used
 
@@ -6433,9 +6606,11 @@ def frontier_brief_get(automatic: int = 0):
         # 30 minutes, so the free Gemini quota is not spent on page loads.
         regenerating = _brief_state["running"] or (brief_due()[0] and start_brief_regen())
         data = json.loads(row["data"])
+        newer = new_events_since(row["created_at"])   # Notable/Major events that started after the brief was written
         return {"status": "ready", "brief": data, "items": brief_items(data), "model": row["model"],
                 "generated_at": row["created_at"], "sync_id": sync, "stale": stale, "regenerating": regenerating,
-                "notice": notice, "breaking": breaking_since(row["created_at"], data)}
+                "notice": notice, "breaking": breaking_since(row["created_at"], data),
+                "newer": {"total": len(newer), "major": sum(1 for g in newer if (g.get("importance") or 0) >= NI.TIER_MAJOR)}}
     regenerating = _brief_state["running"] or (not automatic and start_brief_regen())
     data = automatic_brief(brief_events())
     return {"status": "automatic", "brief": data, "items": brief_items(data), "sync_id": sync,
@@ -6836,7 +7011,7 @@ def get_settings():
         "model_embed": get_setting("gemini_model_embed"), "default_model_embed": DEFAULT_EMBED_MODEL,
         "news_intel": get_setting("news_intel") != "0", "show_dropped": get_setting("show_dropped") == "1",
         "cluster_threshold": cluster_threshold(),
-        "intel": {**(json.loads(get_setting("intel_report") or "{}") or {}), "totals": intel_counts()},
+        "intel": {**(json.loads(get_setting("intel_report") or "{}") or {}), "totals": intel_counts(), "used": models_used()},
         "fetch_on_startup": get_setting("fetch_on_startup") == "1",
         "arxiv_max_results": setting_int("arxiv_max_results", 10, 200),
         "hf_limit": setting_int("hf_limit", 10, 100),

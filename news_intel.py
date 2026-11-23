@@ -158,11 +158,15 @@ def source_tier(source_type: Optional[str], source: Optional[str] = None, url: O
 # Phase 2: embeddings and event clustering
 # ---------------------------------------------------------------------------
 EMBED_DIM = 768
-# Merge threshold (average cosine to an event's members). The brief asked for 0.82; on the live site's real
-# gemini-embedding-001 vectors 0.82 still merged different stories built from the same template (five unrelated
-# funding rounds, separate scandal threads), so the default is 0.88 until the published similarity log
-# (data.gemini.intel.merge_log) shows where same-event and related-story pairs separate. Settings can change it.
-CLUSTER_SIM = 0.88
+# Merge threshold (average cosine to an event's members), calibrated on the live site's similarity log
+# (data.gemini.intel.merge_log, 160 closest pairs of 279 real gemini-embedding-001 vectors, 2026-11-23):
+#   every pair >= 0.887 was the same event (Huang reinstated x6, SpaceX lawsuit, Inkling 2 Mini, SEC probe, ...);
+#   the closest different-story pairs were 0.879 (inference workloads vs. deal cycles), 0.869 / 0.867 (separate
+#   Nvidia threads), 0.858 / 0.852 / 0.844 (separate funding rounds), 0.852 (Inkling vs. DaisyRose).
+# 0.885 keeps every merge above the highest different-story pair; same-event pairs below it (UN talks 0.872, the
+# Riemann reports 0.84-0.87) are left to Gemini's event_slug, which reuses the slugs of the last 48 hours.
+# The brief's original 0.82 merged separate funding rounds into one card. Settings can change it.
+CLUSTER_SIM = 0.885
 CLUSTER_HOURS = 48
 EMBED_SNIPPET_CHARS = 280
 

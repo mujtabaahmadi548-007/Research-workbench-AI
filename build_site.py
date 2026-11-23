@@ -414,7 +414,8 @@ def build_snapshot(S, max_papers: int) -> dict:
         "x": x_snapshot(S),
         # News intelligence: which models the build uses, coverage counts, and the items the AI filter dropped
         # (shown only when "Show dropped items" is on in the site's Settings)
-        "intel": {"models": S.intel_models(), "threshold": S.cluster_threshold(), "totals": S.intel_counts()},
+        "intel": {"models": S.intel_models(), "threshold": S.cluster_threshold(), "totals": S.intel_counts(),
+                  "used": S.models_used()},
         "dropped": S.dropped_items(72, 150),
     }
 
