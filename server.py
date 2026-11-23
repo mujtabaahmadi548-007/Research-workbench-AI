@@ -4005,8 +4005,15 @@ def call_gemini(prompt: str, key: str, model: str, system: str, schema: Optional
             if e.kind != "server":
                 raise e
             last = e
-    fallback = pick_fallback_model(key, model) if get_setting("gemini_fallback") != "0" else None
-    if fallback:
+    # Still overloaded: first the model's own alias (Flash-Lite work stays on Flash-Lite), then another Flash model
+    fallbacks: list[str] = []
+    if get_setting("gemini_fallback") != "0":
+        if alias and alias != model:
+            fallbacks.append(alias)
+        other = pick_fallback_model(key, model)
+        if other and other not in fallbacks and other != model:
+            fallbacks.append(other)
+    for fallback in fallbacks:
         log.info("Gemini: %s is still overloaded; trying %s instead.", model, fallback)
         try:
             text = _gemini_once(prompt, key, fallback, system, **gen)
@@ -4015,7 +4022,7 @@ def call_gemini(prompt: str, key: str, model: str, system: str, schema: Optional
         except GeminiError as e:
             if e.kind not in ("server", "model"):
                 raise
-    tried = f" and also tried {fallback}" if fallback else ""
+    tried = f" and also tried {', '.join(fallbacks)}" if fallbacks else ""
     raise GeminiError("server", f"{last.message} The app retried {len(GEMINI_RETRY_DELAYS)} times{tried}. This is a temporary "
                                 "problem on Google's side: try again in a few minutes, or pick another model in Settings.",
                       last.retry_after)
@@ -4654,7 +4661,9 @@ def brief_due() -> tuple[bool, str]:
 INTEL_MAX_WAIT = timedelta(minutes=float(os.environ.get("WORKBENCH_INTEL_MAX_WAIT_MIN", "20")))
 INTEL_SCORE_BATCH = 40
 INTEL_MAX_SCORE_CALLS = int(os.environ.get("WORKBENCH_INTEL_SCORE_CALLS", "4"))    # per run
-INTEL_MAX_EMBED_CALLS = int(os.environ.get("WORKBENCH_INTEL_EMBED_CALLS", "4"))    # per run (100 texts each)
+INTEL_MAX_EMBED_CALLS = int(os.environ.get("WORKBENCH_INTEL_EMBED_CALLS", "1"))    # per run (100 texts each)
+INTEL_EMBED_HOURS = 72       # only recent reports are embedded (merging looks 48 h around an event's first report)
+CLUSTER_VERSION = "2"        # bump to re-group every event from the cached vectors (no new Gemini calls)
 INTEL_MAX_TRIES = 3          # an item Gemini skips three times keeps its keyword score
 INTEL_CALL_GAP = float(os.environ.get("WORKBENCH_INTEL_CALL_GAP", "4"))   # seconds between calls (free tier RPM)
 _intel_lock = threading.Lock()
@@ -4695,15 +4704,19 @@ def _intel_fail(name: str, e: GeminiError, report: dict) -> None:
 
 
 def _intel_embed(key: str, model: str, report: dict) -> None:
+    """Embed the newest reports that can take part in merges (news_intel.embeddable), within the last 72 hours.
+    The free tier counts every text in a batch as one request (about 100 a minute), so one batch per run."""
+    since = iso(now_utc() - timedelta(hours=INTEL_EMBED_HOURS))
     with db() as c:
-        rows = c.execute(
-            """SELECT n.id, n.title, n.summary FROM news n LEFT JOIN news_vectors v ON v.id = n.id AND v.model = ?
+        cands = c.execute(
+            """SELECT n.id, n.kind, n.title, n.summary FROM news n LEFT JOIN news_vectors v ON v.id = n.id AND v.model = ?
                WHERE v.id IS NULL AND COALESCE(n.published, n.first_seen) >= ? AND COALESCE(n.ai_relevant, 1) = 1
-               ORDER BY n.first_seen DESC LIMIT ?""", (model, _intel_window(), EMBED_BATCH * INTEL_MAX_EMBED_CALLS)).fetchall()
+               AND n.kind IN ('article', 'discussion') ORDER BY n.first_seen DESC LIMIT 2000""", (model, since)).fetchall()
+    rows = [r for r in cands if NI.embeddable(r["kind"], r["title"], r["summary"])][:EMBED_BATCH * INTEL_MAX_EMBED_CALLS]
     for i in range(0, len(rows), EMBED_BATCH):
         chunk = rows[i:i + EMBED_BATCH]
         if i:
-            time.sleep(INTEL_CALL_GAP)
+            time.sleep(max(INTEL_CALL_GAP, 61.0))   # stay under ~100 texts per minute
         vecs = embed_batch([NI.embed_text(r["title"], r["summary"]) for r in chunk], key, model)
         report["calls"] += 1
         with db() as c:
@@ -4713,17 +4726,20 @@ def _intel_embed(key: str, model: str, report: dict) -> None:
 
 
 def _intel_cluster(model: str, report: dict) -> None:
-    """Each item without an event joins the most similar event (centroid cosine >= threshold) whose FIRST report is
-    within 48 hours of it, or starts its own event. Oldest first, so an event's first report founds it. Anchoring
-    on the first report keeps a long-running saga (a CEO resigns, then returns two weeks later) as separate events
-    instead of one card that grows for weeks."""
+    """Each embedded report without an event joins the event its vector is most similar to, measured as the AVERAGE
+    cosine to all of the event's members (>= threshold), if that event's FIRST report is within 48 hours; otherwise
+    it starts its own event. Oldest first, so an event's first report founds it.
+    - Average similarity, not similarity to the centroid: a centroid of several loosely related stories becomes a
+      generic "AI news" vector that every new story resembles (one card swallowed 18 unrelated stories that way).
+    - Anchored on the first report: a long-running saga stays separate events instead of one card growing for weeks."""
     thr, span = cluster_threshold(), timedelta(hours=NI.CLUSTER_HOURS)
     with db() as c:
         rows = c.execute(
-            """SELECT n.id, n.event_id, n.published, n.first_seen, v.vec FROM news n
+            """SELECT n.id, n.event_id, n.kind, n.title, n.summary, n.published, n.first_seen, v.vec FROM news n
                JOIN news_vectors v ON v.id = n.id AND v.model = ?
                WHERE COALESCE(n.published, n.first_seen) >= ? AND COALESCE(n.ai_relevant, 1) = 1""",
             (model, _intel_window())).fetchall()
+    rows = [r for r in rows if NI.embeddable(r["kind"], r["title"], r["summary"])]
     todo = sorted((r for r in rows if not r["event_id"]), key=_item_time)
     if not todo:
         return
@@ -4732,12 +4748,13 @@ def _intel_cluster(model: str, report: dict) -> None:
     def add(eid: str, vec: list[float], t: datetime) -> None:
         e = events.get(eid)
         if e is None:
-            events[eid] = {"sum": list(vec), "lo": t, "hi": t, "cent": None}
+            events[eid] = {"sum": list(vec), "n": 1, "lo": t}
             return
         s = e["sum"]
         for i, x in enumerate(vec):
             s[i] += x
-        e["lo"], e["hi"], e["cent"] = min(e["lo"], t), max(e["hi"], t), None
+        e["n"] += 1
+        e["lo"] = min(e["lo"], t)
 
     for r in rows:
         if r["event_id"]:
@@ -4745,19 +4762,18 @@ def _intel_cluster(model: str, report: dict) -> None:
     updates = []
     for r in todo:
         vec, t = NI.unpack_vec(r["vec"]), _item_time(r)
-        cands = {}
+        best, best_sim = None, thr
         for eid, e in events.items():
             if abs(t - e["lo"]) <= span:
-                if e["cent"] is None:
-                    e["cent"] = NI.l2_normalize(e["sum"])
-                cands[eid] = e["cent"]
-        eid, _sim = NI.best_event(vec, cands, thr)
-        if eid is None:
-            eid = "ev:" + r["id"]
+                s = NI.mean_similarity(vec, e["sum"], e["n"])
+                if s >= best_sim:
+                    best, best_sim = eid, s
+        if best is None:
+            best = "ev:" + r["id"]
         else:
             report["merged"] += 1
-        add(eid, vec, t)
-        updates.append((eid, r["id"]))
+        add(best, vec, t)
+        updates.append((best, r["id"]))
     with db() as c:
         c.executemany("UPDATE news SET event_id=? WHERE id=? AND event_id IS NULL", updates)
     report["clustered"] += len(updates)
@@ -4851,7 +4867,6 @@ def _intel_merge_slugs(report: dict) -> None:
         rows = c.execute("""SELECT id, event_id, event_slug, published, first_seen FROM news
                             WHERE event_slug IS NOT NULL AND event_slug != '' AND ai_relevant = 1
                             AND COALESCE(published, first_seen) >= ?""", (_intel_window(),)).fetchall()
-        sizes = {r[0]: r[1] for r in c.execute("SELECT event_id, COUNT(*) FROM news WHERE event_id IS NOT NULL GROUP BY event_id")}
         by_slug: dict[str, list] = {}
         for r in rows:
             if r["event_slug"].count("-") >= 2:
@@ -4869,21 +4884,17 @@ def _intel_merge_slugs(report: dict) -> None:
                     cur = [r]
             runs.append(cur)
             for run in runs:
-                eids = [r["event_id"] for r in run if r["event_id"]]
-                if len(run) < 2 or (len(set(eids)) <= 1 and len(eids) == len(run)):
+                if len(run) < 2:
                     continue
-                target = max(set(eids), key=lambda e: (sizes.get(e, 0), -eids.index(e))) if eids else "ev:" + run[0]["id"]
-                for r in run:
-                    if r["event_id"] == target:
-                        continue
-                    if r["event_id"]:
-                        n = c.execute("UPDATE news SET event_id=? WHERE event_id=?", (target, r["event_id"])).rowcount
-                        sizes[target] = sizes.get(target, 0) + n
-                        sizes.pop(r["event_id"], None)
-                    else:
+                # The run joins the event of its earliest report. Only the reports in this run move (never whole
+                # events), so a slug cannot chain events from different days into one card.
+                target = run[0]["event_id"] or "ev:" + run[0]["id"]
+                if not run[0]["event_id"]:
+                    c.execute("UPDATE news SET event_id=? WHERE id=?", (target, run[0]["id"]))
+                for r in run[1:]:
+                    if r["event_id"] != target:
                         c.execute("UPDATE news SET event_id=? WHERE id=?", (target, r["id"]))
-                        sizes[target] = sizes.get(target, 0) + 1
-                    report["slug_merges"] += 1
+                        report["slug_merges"] += 1
 
 
 def intel_counts() -> dict:
@@ -4913,6 +4924,12 @@ def intel_step(key: Optional[str], min_age_minutes: float = 0, force: bool = Fal
         return report
     try:
         models = report["models"]
+        if get_setting("intel_cluster_version") != CLUSTER_VERSION:   # merging rules changed: re-group from cached vectors
+            with db() as c:
+                n = c.execute("UPDATE news SET event_id=NULL WHERE event_id IS NOT NULL").rowcount
+            set_setting("intel_cluster_version", CLUSTER_VERSION)
+            report["regrouped"] = n
+            log.info("News intelligence: merging rules changed (v%s); re-grouping %d items.", CLUSTER_VERSION, n)
         if force or not _pause_left("embed"):
             try:
                 _intel_embed(key, models["embed"], report)
@@ -4929,7 +4946,7 @@ def intel_step(key: Optional[str], min_age_minutes: float = 0, force: bool = Fal
         else:
             report["errors"].append(f"score: paused for {_pause_left('score') / 60:.0f} more min after an error")
         _intel_merge_slugs(report)
-        if report["clustered"] or report["scored"] or report["slug_merges"]:
+        if report["clustered"] or report["scored"] or report["slug_merges"] or report.get("regrouped"):
             rescore_news()
     except Exception as exc:   # never let the pipeline break a refresh or a website build
         log.exception("News intelligence failed unexpectedly.")

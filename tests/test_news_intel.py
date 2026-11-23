@@ -87,6 +87,38 @@ class Vectors(unittest.TestCase):
         self.assertIsNone(NI.best_event(NI.l2_normalize([1, 1, 1]), cents, 0.9)[0])
 
 
+class Drift(unittest.TestCase):
+    """Real embeddings of unrelated AI stories share a strong generic direction. The centroid of a few such stories
+    approaches that direction, so every new story is 'similar to the event'; the mean similarity is not fooled."""
+
+    def test_mean_similarity_resists_generic_blob(self):
+        rnd = random.Random(7)
+        dim = 768
+        generic = NI.l2_normalize([rnd.gauss(0, 1) for _ in range(dim)])
+
+        def story():   # unrelated AI story: generic part + its own topic
+            own = NI.l2_normalize([rnd.gauss(0, 1) for _ in range(dim)])
+            return NI.l2_normalize([0.86 * g + 0.51 * o for g, o in zip(generic, own)])
+
+        members = [story() for _ in range(8)]
+        new = story()
+        pair = NI.cosine(members[0], members[1])
+        self.assertLess(pair, 0.82)                       # two unrelated stories do not merge
+        cent = NI.centroid(members)
+        self.assertGreaterEqual(NI.cosine(new, cent), 0.82)   # ...but the centroid would swallow a new one
+        s = [sum(col) for col in zip(*members)]
+        self.assertLess(NI.mean_similarity(new, s, len(members)), 0.82)   # the mean does not
+        # a real rephrasing of member 0 still joins
+        rephrase = NI.l2_normalize([0.97 * a + 0.24 * b for a, b in zip(members[0], NI.l2_normalize([rnd.gauss(0, 1) for _ in range(dim)]))])
+        self.assertGreaterEqual(NI.mean_similarity(rephrase, members[0], 1), 0.82)
+
+    def test_embeddable(self):
+        self.assertFalse(NI.embeddable("article", "The Toolsmith", ""))
+        self.assertFalse(NI.embeddable("model", "Qwen/Qwen3.8-Flash", "A long description of the model and what it does well."))
+        self.assertTrue(NI.embeddable("article", "Nvidia's board votes to reinstate Jensen Huang as CEO", ""))
+        self.assertTrue(NI.embeddable("discussion", "Show HN: a tiny agent runtime", "It runs agents in microVMs with snapshots."))
+
+
 class Scoring(unittest.TestCase):
     def test_formula(self):
         s, p = NI.display_score(40, 10, outlets=3, tier="primary")

@@ -222,6 +222,27 @@ def best_event(vec: Sequence[float], centroids: dict[str, Sequence[float]],
     return (best, best_sim) if best is not None and best_sim >= threshold else (None, best_sim)
 
 
+def mean_similarity(vec: Sequence[float], member_sum: Sequence[float], n: int) -> float:
+    """Average cosine between `vec` and each of an event's n members (all L2-normalized), from the members' vector sum.
+    Unlike similarity to the (re-normalized) centroid, this does not drift upward as a group of loosely related
+    stories grows: a blob of different "AI news" items has a generic centroid that every new AI story resembles,
+    but its members are not, on average, similar to a new story."""
+    return dot(vec, member_sum) / n if n else 0.0
+
+
+MIN_EMBED_CHARS, MIN_EMBED_WORDS = 40, 6
+
+
+def embeddable(kind: Optional[str], title: Optional[str], snippet: Optional[str]) -> bool:
+    """Only news reports with enough text take part in embedding merges. Model-hub ids ("org/model-7B"), GitHub repos
+    and bare headlines without a snippet embed to generic vectors that look similar to everything; they keep the
+    model-token / link / headline matching instead."""
+    if kind not in ("article", "discussion"):
+        return False
+    text = embed_text(title or "", snippet)
+    return len(text) >= MIN_EMBED_CHARS and len(text.split()) >= MIN_EMBED_WORDS
+
+
 # ---------------------------------------------------------------------------
 # Phase 3: batched Gemini scoring (schema, prompt, validation) and the display score
 # ---------------------------------------------------------------------------
